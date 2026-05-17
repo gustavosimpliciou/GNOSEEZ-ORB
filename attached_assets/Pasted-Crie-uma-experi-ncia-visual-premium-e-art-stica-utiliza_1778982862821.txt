@@ -1,0 +1,165 @@
+Crie uma experiência visual premium e artística utilizando apenas HTML, CSS e JavaScript puro em um único arquivo .html, sem bibliotecas externas, sem frameworks e sem dependências adicionais.
+
+O objetivo é desenvolver uma esfera neural minimalista inspirada em interfaces futuristas, mapas neurais e conexões orgânicas semelhantes ao estilo visual do software Obsidian, porém com identidade própria extremamente refinada, cinematográfica e profissional.
+
+A interface deve transmitir:
+
+inteligência
+credibilidade
+sofisticação
+tecnologia avançada
+fluidez orgânica
+precisão visual
+sensação de consciência digital viva
+
+A estética geral deve ser:
+
+minimalista
+monocromática
+elegante
+limpa
+moderna
+artística
+altamente polida
+sem aparência gamer
+sem exageros neon
+sem visual infantil
+
+ESTILO VISUAL:
+
+Fundo totalmente branco puro (#ffffff)
+Elementos da esfera totalmente pretos (#000000)
+Tons intermediários apenas em cinza translúcido
+Visual inspirado em:
+redes neurais
+partículas inteligentes
+conexões sinápticas
+estruturas moleculares
+mapas mentais orgânicos
+interfaces de IA premium
+arte generativa minimalista
+visualização abstrata de áudio
+
+A ESFERA:
+
+Deve ser formada por centenas de pequenos pontos extremamente suaves
+Os pontos devem se conectar dinamicamente por linhas finas
+As conexões devem aparecer e desaparecer organicamente
+O formato geral deve lembrar uma esfera viva e respirando
+A esfera nunca pode parecer estática
+Deve existir micro movimento contínuo mesmo em silêncio
+O movimento deve ser extremamente fluido e natural
+Nada pode parecer robótico ou mecânico
+O movimento deve parecer “vivo”
+
+COMPORTAMENTO:
+A esfera deve reagir ao microfone em tempo real utilizando Web Audio API.
+
+A captura do áudio deve ser extremamente sensível:
+
+reagir até aos menores ruídos
+captar nuances sutis
+responder suavemente ao ambiente
+transmitir visualmente a intensidade sonora
+
+REAÇÕES AO SOM:
+Conforme o áudio aumenta:
+
+os pontos se afastam levemente
+a esfera expande organicamente
+conexões aumentam
+vibrações suaves aparecem
+pequenas ondas percorrem a estrutura
+o núcleo pulsa discretamente
+linhas mudam levemente de espessura
+micro partículas flutuam ao redor
+
+Em silêncio:
+
+a esfera continua respirando lentamente
+conexões continuam se reorganizando
+partículas continuam vivas
+leve movimento gravitacional contínuo
+
+ANIMAÇÃO:
+A animação deve possuir:
+
+easing cinematográfico
+interpolação suave
+física orgânica
+movimento procedural
+sensação de peso e leveza ao mesmo tempo
+ausência total de jitter
+ausência de movimentos bruscos
+
+A movimentação deve lembrar:
+
+poeira cósmica inteligente
+neurônios digitais
+constelações vivas
+matéria escura interativa
+
+QUALIDADE:
+O resultado final deve parecer:
+
+uma instalação artística digital
+uma IA de filme futurista
+interface de laboratório avançado
+sistema operacional de inteligência artificial
+visualização sonora premium
+
+REQUISITOS TÉCNICOS:
+
+Tudo deve existir em UM único arquivo HTML
+Não utilizar canvas de baixa qualidade visual
+Priorizar alta fluidez
+Código organizado e limpo
+Responsividade completa
+Compatível com OBS Studio Browser Source
+Fundo transparente opcional facilmente ativável
+Performance otimizada
+FPS suave
+Sem bibliotecas externas
+Sem dependências CDN
+Apenas:
+HTML
+CSS
+JavaScript puro
+
+DESEJO VISUAL ESPECÍFICO:
+A esfera deve parecer uma entidade digital consciente escutando o ambiente em tempo real.
+
+Ela não deve parecer apenas um visualizador de áudio.
+Ela deve parecer “pensar”, “respirar” e “processar”.
+
+Cada pequeno som deve produzir micro reações extremamente naturais.
+
+O resultado precisa parecer digno de:
+
+direção de arte premium
+artista digital profissional
+interface de filme sci-fi
+visual de startup de IA bilionária
+
+Adicionar:
+
+profundidade visual
+sensação tridimensional
+partículas orbitais suaves
+conexões adaptativas
+micro oscilações
+respiração procedural
+distorções leves baseadas em frequência sonora
+
+A esfera deve permanecer elegante mesmo quando o áudio estiver intenso.
+
+O design final deve ser:
+
+sofisticado
+limpo
+hipnotizante
+artístico
+futurista
+inteligente
+minimalista
+extremamente refinado.
