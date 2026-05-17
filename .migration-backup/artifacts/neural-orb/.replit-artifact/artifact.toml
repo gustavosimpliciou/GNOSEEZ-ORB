@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Neural Orb"
+version = "1.0.0"
+id = "artifacts/neural-orb"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 21217
+
+[services.development]
+run = "pnpm --filter @workspace/neural-orb run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/neural-orb", "run", "build" ]
+publicDir = "artifacts/neural-orb/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "21217"
+BASE_PATH = "/"

@@ -4,8 +4,7 @@
   "exclude": ["node_modules", "build", "dist", "**/*.test.ts"],
   "compilerOptions": {
     "noEmit": true,
-    "jsx": "react-jsx",
-    "jsxImportSource": "react",
+    "jsx": "preserve",
     "lib": ["esnext", "dom", "dom.iterable"],
     "resolveJsonModule": true,
     "allowImportingTsExtensions": true,
@@ -14,5 +13,10 @@
     "paths": {
       "@/*": ["./src/*"]
     }
-  }
+  },
+  "references": [
+    {
+      "path": "../../lib/api-client-react"
+    }
+  ]
 }

@@ -1,0 +1,8 @@
+uploads = []
+outputs = []
+
+[[generated]]
+id = "bG9_WsdKIv1NkBneBi2GX"
+uri = "file://artifacts/neural-orb-mobile/assets/images/icon.png"
+type = "image"
+title = "neural orb app icon"

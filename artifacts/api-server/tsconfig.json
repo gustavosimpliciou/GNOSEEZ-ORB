@@ -3,9 +3,15 @@
   "compilerOptions": {
     "outDir": "dist",
     "rootDir": "src",
-    "esModuleInterop": true,
-    "allowSyntheticDefaultImports": true,
     "types": ["node"]
   },
-  "include": ["src"]
+  "include": ["src"],
+  "references": [
+    {
+      "path": "../../lib/db"
+    },
+    {
+      "path": "../../lib/api-zod"
+    }
+  ]
 }

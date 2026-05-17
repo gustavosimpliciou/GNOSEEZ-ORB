@@ -1,0 +1,27 @@
+kind = "mobile"
+previewPath = "/neural-orb-mobile/"
+title = "Neural Orb Mobile"
+version = "1.0.0"
+id = "artifacts/neural-orb-mobile"
+router = "expo-domain"
+
+[[integratedSkills]]
+name = "expo"
+version = "1.0.0"
+
+[[services]]
+ensurePreviewReachable = "/status"
+name = "expo"
+paths = [ "/neural-orb-mobile/" ]
+localPort = 18804
+
+[services.development]
+run = "pnpm --filter @workspace/neural-orb-mobile run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/neural-orb-mobile", "run", "build" ]
+run = [ "pnpm", "--filter", "@workspace/neural-orb-mobile", "run", "serve" ]
+
+[services.env]
+PORT = "18804"
+BASE_PATH = "/neural-orb-mobile/"
