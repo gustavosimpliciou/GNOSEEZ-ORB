@@ -163,7 +163,7 @@ export default function NeuralOrb() {
     accentColor:  "#f97316",
     rgb:          { r: 249, g: 115, b: 22 },
     analyser:     null as AnalyserNode | null,
-    dataArray:    null as Uint8Array | null,
+    dataArray:    null as Uint8Array<ArrayBuffer> | null,
     raf:          0,
     cx:           0,
     cy:           0,
@@ -214,7 +214,6 @@ export default function NeuralOrb() {
         echoCancellation: false,
         noiseSuppression: false,
         autoGainControl:  false,
-        latency:          0,
       } });
       const ctx      = new AudioContext();
       const src      = ctx.createMediaStreamSource(stream);
