@@ -42,7 +42,7 @@ const MOUSE_R       = 180;
 const MOUSE_F       = 4.0;
 const AUDIO_F_LOW   = 0.08;
 const AUDIO_F_HIGH  = 1.5;
-const THRESHOLD     = 0.35;
+const THRESHOLD     = 0.42;   // only real speech crosses this bar
 const NOISE_AMT     = 2.5;
 const NOISE_SPD     = 0.00045;
 const WAVE_DOTS     = 32;
@@ -50,8 +50,12 @@ const MIN_ZOOM      = 0.48;
 const MAX_ZOOM      = 1.38;
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
-const lerp  = (a: number, b: number, t: number) => a + (b - a) * t;
-const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+const lerp  = (a: number, b: number, t: number) => {
+  const r = a + (b - a) * t;
+  return isFinite(r) ? r : a;
+};
+const clamp = (v: number, lo: number, hi: number) =>
+  isFinite(v) ? Math.max(lo, Math.min(hi, v)) : lo;
 
 function snoise(x: number, y: number, t: number) {
   return (
@@ -170,6 +174,7 @@ export default function NeuralOrb() {
     ripples:      [] as { r: number; alpha: number; maxR: number }[],
     waves:        [] as SphereWave[],
     lastWaveTime: -999,
+    noiseFloor:   0,
   });
 
   const [micActive,   setMicActive]   = useState(false);
@@ -219,7 +224,7 @@ export default function NeuralOrb() {
       const src      = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 256;
-      analyser.smoothingTimeConstant = 0.25;
+      analyser.smoothingTimeConstant = 0.75;
       src.connect(analyser);
       S.current.analyser  = analyser;
       S.current.dataArray = new Uint8Array(analyser.frequencyBinCount);
@@ -309,11 +314,23 @@ export default function NeuralOrb() {
     let uiCounter = 0;
 
     const tick = (now: number) => {
+      try {
       const dt = clamp((now - lastNow) / 16.667, 0.1, 3);
       lastNow  = now;
       const s  = S.current;
       if (!s.waves)        s.waves        = [];
       if (s.lastWaveTime === undefined) s.lastWaveTime = -999;
+
+      // ── sanitize accumulated state that could have gone NaN ─────────────
+      if (!isFinite(s.smoothAudio))  s.smoothAudio  = 0;
+      if (!isFinite(s.breathPhase))  s.breathPhase  = 0;
+      if (!isFinite(s.time))         s.time         = 0;
+      if (!isFinite(s.rotX))         s.rotX         = 0;
+      if (!isFinite(s.rotY))         s.rotY         = 0;
+      for (let b = 0; b < 4; b++) {
+        if (!isFinite(s.bands?.[b])) s.bands[b] = 0;
+      }
+
       const isDark = darkRef.current;
       const W  = canvas.width, H = canvas.height;
       const { cx, cy } = s;
@@ -332,13 +349,39 @@ export default function NeuralOrb() {
           const hi = Math.floor(cuts[b + 1] * len);
           let sum  = 0;
           for (let i = lo; i < hi; i++) sum += s.dataArray[i];
-          rawBands[b] = Math.pow((sum / ((hi - lo) * 255)) * 3.0, 0.6);
+          rawBands[b] = Math.pow((sum / ((hi - lo) * 255)) * 2.2, 0.65);
         }
-        // Skip lowest ~10% of bins (sub-bass rumble) to avoid false triggers
-        const skipBins = Math.floor(len * 0.10);
+        // Voice frequency window: ~300 Hz – 3.5 kHz (bins 4%–45%)
+        // Ignores sub-bass rumble and high-frequency hiss
+        const voiceLo = Math.floor(len * 0.04);
+        const voiceHi = Math.floor(len * 0.45);
         let sum = 0;
-        for (let i = skipBins; i < len; i++) sum += s.dataArray[i];
-        totalLvl = Math.pow((sum / ((len - skipBins) * 255)) * 3.0, 0.6);
+        for (let i = voiceLo; i < voiceHi; i++) sum += s.dataArray[i];
+        const binRange = (voiceHi - voiceLo) * 255;
+        const rawLvlRaw = binRange > 0
+          ? Math.pow(clamp((sum / binRange) * 1.4, 0, 10), 0.75)
+          : 0;
+        const rawLvl = isFinite(rawLvlRaw) ? clamp(rawLvlRaw, 0, 1) : 0;
+
+        // ── Adaptive noise gate ──────────────────────────────────────────
+        // The floor slowly rises to match ambient silence, then subtracts
+        // itself out so only sounds *above* the mic's own noise register.
+        if (!isFinite(s.noiseFloor) || s.noiseFloor < 0) s.noiseFloor = 0;
+        const overFloor = rawLvl > s.noiseFloor + 0.22;  // must be clearly above noise
+        if (overFloor) {
+          // Sound detected — floor decays very slowly (don't count speech as noise)
+          s.noiseFloor = lerp(s.noiseFloor, s.noiseFloor * 0.995, 0.05 * dt);
+        } else {
+          // Quiet — learn ambient level quickly so it gets subtracted out
+          s.noiseFloor = lerp(s.noiseFloor, rawLvl, 0.055 * dt);
+        }
+        if (!isFinite(s.noiseFloor)) s.noiseFloor = 0;
+        // Subtract floor with aggressive 2.2× headroom margin
+        const floor    = clamp(s.noiseFloor * 2.20, 0, 0.95);
+        const cleaned  = clamp(rawLvl - floor, 0, 1);
+        const ceiling  = clamp(1 - floor, 0.05, 1);
+        const lvlRaw   = cleaned / ceiling;
+        totalLvl       = isFinite(lvlRaw) ? clamp(lvlRaw, 0, 1) : 0;
 
         for (let d = 0; d < WAVE_DOTS; d++) {
           const binIdx = Math.floor((d / WAVE_DOTS) * len);
@@ -347,23 +390,23 @@ export default function NeuralOrb() {
       }
 
       const targetAudio = clamp(totalLvl, 0, 1);
-      // Asymmetric lerp: fast attack so the orb responds instantly to sound peaks,
-      // moderate release so it doesn't cut off abruptly
-      const audioAttack  = targetAudio > s.smoothAudio ? 0.58 : 0.11;
-      s.smoothAudio = lerp(s.smoothAudio, targetAudio, audioAttack * dt);
+      // Moderate attack — requires sustained sound, not just a quick tap
+      const audioAttack  = targetAudio > s.smoothAudio ? 0.38 : 0.06;
+      s.smoothAudio = clamp(lerp(s.smoothAudio, targetAudio, audioAttack * dt), 0, 1);
       for (let b = 0; b < 4; b++) {
         const raw = clamp(rawBands[b], 0, 1);
-        const bandAttack = raw > s.bands[b] ? 0.32 : 0.10;
-        s.bands[b] = lerp(s.bands[b], raw, bandAttack * dt);
+        const bandAttack = raw > s.bands[b] ? 0.55 : 0.08;
+        s.bands[b] = clamp(lerp(s.bands[b], raw, bandAttack * dt), 0, 1);
       }
-      const sl = s.smoothAudio;
+      const sl = isFinite(s.smoothAudio) ? s.smoothAudio : 0;
 
       // ── threshold gate — only react to medium-high sound ────────────────
       const aboveThreshold = sl > THRESHOLD;
       // Below threshold: nearly dead. Above: full, smooth reactivity.
-      const effectiveAudio = aboveThreshold
+      const effectiveAudioRaw = aboveThreshold
         ? sl
         : sl * (sl / THRESHOLD) * 0.08;
+      const effectiveAudio = isFinite(effectiveAudioRaw) ? clamp(effectiveAudioRaw, 0, 1) : 0;
       const audioForce = aboveThreshold ? AUDIO_F_HIGH : AUDIO_F_LOW;
 
       // ── sphere waves ─────────────────────────────────────────────────────
@@ -438,6 +481,14 @@ export default function NeuralOrb() {
         const ny = snoise(p.by * 0.003, p.bz * 0.003, nt + 7.3)  * noiseScale;
         const nz = snoise(p.bz * 0.003, p.bx * 0.003, nt + 14.6) * noiseScale;
 
+        // Sanitize any NaN that crept into position/velocity from previous frames
+        if (!isFinite(p.wx)) { p.wx = p.bx; p.vx = 0; }
+        if (!isFinite(p.wy)) { p.wy = p.by; p.vy = 0; }
+        if (!isFinite(p.wz)) { p.wz = p.bz; p.vz = 0; }
+        if (!isFinite(p.vx)) p.vx = 0;
+        if (!isFinite(p.vy)) p.vy = 0;
+        if (!isFinite(p.vz)) p.vz = 0;
+
         const bandVal = s.bands[p.band];
         const rLen    = Math.sqrt(p.bx*p.bx + p.by*p.by + p.bz*p.bz) || 1;
         const af      = (aboveThreshold ? bandVal : bandVal * 0.10) * audioForce * dt;
@@ -457,12 +508,23 @@ export default function NeuralOrb() {
         p.wy += p.vy * dt;
         p.wz += p.vz * dt;
 
-        // Idle micro-drift — a sparse random few particles twitch gently below threshold
-        // giving the orb a sense of "listening" even when quiet
-        if (!aboveThreshold && Math.random() < 0.0009 * dt) {
+        // Irregular random impulses — always active, chaotic above threshold
+        const impulseChance = aboveThreshold ? 0.004 + sl * 0.018 : 0.0012;
+        if (Math.random() < impulseChance * dt) {
           const theta = Math.random() * Math.PI * 2;
           const phi   = Math.acos(2 * Math.random() - 1);
-          const str   = 0.5 + Math.random() * 0.9;
+          const str   = aboveThreshold
+            ? (1.0 + Math.random() * 3.0) * (0.5 + sl)
+            : 0.4 + Math.random() * 0.8;
+          p.vx += Math.sin(phi) * Math.cos(theta) * str;
+          p.vy += Math.sin(phi) * Math.sin(theta) * str;
+          p.vz += Math.cos(phi) * str;
+        }
+        // Occasional burst spike — creates sudden irregular group pops
+        if (aboveThreshold && sl > 0.25 && Math.random() < 0.0006 * dt * sl) {
+          const theta = Math.random() * Math.PI * 2;
+          const phi   = Math.acos(2 * Math.random() - 1);
+          const str   = 4.0 + Math.random() * 5.0;
           p.vx += Math.sin(phi) * Math.cos(theta) * str;
           p.vy += Math.sin(phi) * Math.sin(theta) * str;
           p.vz += Math.cos(phi) * str;
@@ -556,8 +618,9 @@ export default function NeuralOrb() {
       const nPulse   = Math.sin(nPhase) * 0.5 + 0.5;
       const nBreath  = Math.sin(nPhase * 0.56 + 1.2) * 0.5 + 0.5;
       // audioNudge allows nucleus to grow ~50% at peak volume
-      const audioNudge = aboveThreshold ? sl * 5.2 : sl * 0.18;
-      const nBaseR   = (6.5 + nPulse * 2.2 + nBreath * 1.1 + audioNudge) * zoom;
+      const audioNudge = isFinite(sl) ? (aboveThreshold ? sl * 6.5 : sl * 0.22) : 0;
+      const nBaseRRaw = (12.7 + nPulse * 4.29 + nBreath * 2.14 + audioNudge) * zoom;
+      const nBaseR    = isFinite(nBaseRRaw) && nBaseRRaw > 0 ? nBaseRRaw : 12.7;
       const nAlpha   = (0.60 + nPulse * 0.22) * (isDark ? 1.28 : 1.0);
 
       // Irregular drifting blobs — organic light-source
@@ -593,6 +656,54 @@ export default function NeuralOrb() {
         ctx2d.fillStyle = nGrd;
         ctx2d.fill();
       }
+
+      // ── lightning arcs around nucleus ───────────────────────────────────
+      const boltCount = aboveThreshold ? Math.round(2 + sl * 10) : (Math.random() < 0.18 ? 1 : 0);
+      const boltAlpha = aboveThreshold ? clamp(0.25 + sl * 0.75, 0.25, 1.0) : 0.12;
+      const boltLen   = nBaseR * (2.2 + sl * 2.8);
+      ctx2d.save();
+      ctx2d.globalCompositeOperation = "screen";
+      for (let bi = 0; bi < boltCount; bi++) {
+        const angle    = Math.random() * Math.PI * 2;
+        const len      = boltLen * (0.5 + Math.random() * 0.9);
+        const alpha    = boltAlpha * (0.4 + Math.random() * 0.6);
+        const startR   = nBaseR * (0.7 + Math.random() * 0.3);
+        const startX   = cx + Math.cos(angle) * startR;
+        const startY   = cy + Math.sin(angle) * startR;
+        const segs     = 3 + Math.floor(Math.random() * 5);
+        const jitter   = len * (0.28 + Math.random() * 0.2);
+
+        // Main bolt
+        ctx2d.beginPath();
+        ctx2d.moveTo(startX, startY);
+        let bx = startX, by = startY;
+        for (let seg = 1; seg <= segs; seg++) {
+          const prog = seg / segs;
+          const fade = 1 - prog * 0.5;
+          bx = startX + Math.cos(angle) * len * prog + (Math.random() - 0.5) * jitter * fade;
+          by = startY + Math.sin(angle) * len * prog + (Math.random() - 0.5) * jitter * fade;
+          ctx2d.lineTo(bx, by);
+        }
+        ctx2d.strokeStyle = `rgba(160,230,255,${alpha.toFixed(3)})`;
+        ctx2d.lineWidth   = 0.5 + Math.random() * 1.0;
+        ctx2d.stroke();
+
+        // Bright core on the bolt
+        ctx2d.beginPath();
+        ctx2d.moveTo(startX, startY);
+        let bx2 = startX, by2 = startY;
+        for (let seg = 1; seg <= segs; seg++) {
+          const prog = seg / segs;
+          const fade = 1 - prog * 0.6;
+          bx2 = startX + Math.cos(angle) * len * 0.6 * prog + (Math.random() - 0.5) * jitter * 0.3 * fade;
+          by2 = startY + Math.sin(angle) * len * 0.6 * prog + (Math.random() - 0.5) * jitter * 0.3 * fade;
+          ctx2d.lineTo(bx2, by2);
+        }
+        ctx2d.strokeStyle = `rgba(230,248,255,${(alpha * 0.7).toFixed(3)})`;
+        ctx2d.lineWidth   = 0.3;
+        ctx2d.stroke();
+      }
+      ctx2d.restore();
 
       // connections
       for (let i = 0; i < ps.length; i++) {
@@ -641,6 +752,7 @@ export default function NeuralOrb() {
         const sz  = Math.max(0.15, p.baseSize * (0.4 + dF * 0.85) * (1 + p.energy * 1.4) * zoom);
         const solidA = (0.3 + dF * 0.65) * (1 - p.dissolve * 0.85);
 
+        if (!isFinite(p.sx) || !isFinite(p.sy)) continue;
         if (p.energy > 0.08 && solidA > 0.01) {
           const glowR = Math.max(0.1, sz * (2.5 + p.energy * 4));
           const grd   = ctx2d.createRadialGradient(p.sx, p.sy, 0, p.sx, p.sy, glowR);
@@ -672,7 +784,8 @@ export default function NeuralOrb() {
       }
 
       // nucleus glow
-      const nucR = Math.max(0.1, 12 * (0.6 + breath * 0.4 + effectiveAudio) * zoom);
+      const safeBreath = isFinite(breath) ? breath : 0.5;
+      const nucR = clamp(19.0 * (0.6 + safeBreath * 0.4 + effectiveAudio) * zoom, 0.1, 2000);
       const nucG = ctx2d.createRadialGradient(cx, cy, 0, cx, cy, nucR * 5);
       nucG.addColorStop(0,   `rgba(${cr},${cg},${cb},${(0.04 + effectiveAudio * 0.10).toFixed(3)})`);
       nucG.addColorStop(0.5, `rgba(${cr},${cg},${cb},${(0.01 + effectiveAudio * 0.03).toFixed(3)})`);
@@ -684,6 +797,17 @@ export default function NeuralOrb() {
 
       s.time += dt;
       s.raf = requestAnimationFrame(tick);
+      } catch (e) {
+        // If any rendering step throws (e.g. non-finite gradient), recover silently
+        // and sanitize state so the next frame starts clean.
+        if (S.current) {
+          S.current.smoothAudio = 0;
+          S.current.breathPhase = 0;
+          if (S.current.bands) S.current.bands.fill(0);
+          S.current.raf = requestAnimationFrame(tick);
+        }
+        console.warn("Neural Orb tick error (recovered):", e);
+      }
     };
 
     S.current.raf = requestAnimationFrame(tick);
