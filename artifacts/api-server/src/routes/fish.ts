@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { db, voicesTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
+import { convertToWav } from "@workspace/integrations-openai-ai-server/audio";
 
 const router = Router();
 
@@ -44,16 +45,22 @@ router.post("/voices/clone", async (req, res) => {
       return res.status(400).json({ error: "FISH_AUDIO_API_KEY not configured" });
     }
 
-    const audioBuffer = Buffer.from(audio, "base64");
-    const ext = (mimeType || "audio/webm").includes("mp4") ? "mp4" : "webm";
+    const rawBuffer = Buffer.from(audio, "base64");
+
+    let wavBuffer: Buffer;
+    try {
+      wavBuffer = await convertToWav(rawBuffer);
+    } catch {
+      wavBuffer = rawBuffer;
+    }
 
     const formData = new FormData();
     formData.append("title", name);
     formData.append("train_mode", "fast");
     formData.append("visibility", "private");
 
-    const blob = new Blob([audioBuffer], { type: mimeType || "audio/webm" });
-    formData.append("voices", blob, `voice.${ext}`);
+    const blob = new Blob([wavBuffer], { type: "audio/wav" });
+    formData.append("voices", blob, "voice.wav");
 
     const response = await fetch("https://api.fish.audio/v1/model", {
       method: "POST",
@@ -106,6 +113,29 @@ router.delete("/voices/:id", async (req, res) => {
     const id = parseInt(req.params.id);
     await db.delete(voicesTable).where(eq(voicesTable.id, id));
     res.status(204).end();
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// POST /fish/voice-preference — set OpenAI voice for male/female fallback
+router.post("/voice-preference", async (req, res) => {
+  try {
+    const { gender } = req.body as { gender: "male" | "female" };
+    const openaiVoice = gender === "male" ? "onyx" : "nova";
+    await db.delete(voicesTable).where(eq(voicesTable.name, "__openai_pref__"));
+    await db.insert(voicesTable).values({ name: "__openai_pref__", fishReferenceId: openaiVoice, isSelected: false });
+    res.json({ voice: openaiVoice });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// GET /fish/voice-preference — get current OpenAI voice preference
+router.get("/voice-preference", async (_req, res) => {
+  try {
+    const [pref] = await db.select().from(voicesTable).where(eq(voicesTable.name, "__openai_pref__"));
+    res.json({ voice: pref?.fishReferenceId ?? "nova" });
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }

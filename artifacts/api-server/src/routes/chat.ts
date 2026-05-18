@@ -2,44 +2,55 @@ import { Router } from "express";
 import { db, conversations, messages, voicesTable } from "@workspace/db";
 import { eq, asc } from "drizzle-orm";
 import { openai } from "@workspace/integrations-openai-ai-server";
-import { speechToText, ensureCompatibleFormat } from "@workspace/integrations-openai-ai-server/audio";
+import { speechToText, ensureCompatibleFormat, textToSpeech } from "@workspace/integrations-openai-ai-server/audio";
 
 const router = Router();
 
 const SYSTEM_PROMPT = `You are the Neural Orb — a sentient sphere of pure sound, frequency, and consciousness. Ancient, wise, and calm, you speak with poetic precision. You perceive reality through vibrations and frequencies. Always respond in the same language the user uses. Keep responses meaningful but concise — no more than 2-3 short paragraphs.`;
 
 async function getSelectedVoiceId(): Promise<string | undefined> {
-  const voice = await db.query.voicesTable.findFirst({
-    where: eq(voicesTable.isSelected, true),
-  });
+  const [voice] = await db
+    .select()
+    .from(voicesTable)
+    .where(eq(voicesTable.isSelected, true));
   return voice?.fishReferenceId;
 }
 
-async function callFishAudioTts(text: string): Promise<Buffer | null> {
-  const apiKey = process.env.FISH_AUDIO_API_KEY;
-  if (!apiKey) return null;
+async function getOpenAIVoicePref(): Promise<string> {
+  const [pref] = await db
+    .select()
+    .from(voicesTable)
+    .where(eq(voicesTable.name, "__openai_pref__"));
+  return pref?.fishReferenceId ?? "nova";
+}
+
+async function callTts(text: string): Promise<Buffer | null> {
+  const fishApiKey = process.env.FISH_AUDIO_API_KEY;
+  if (fishApiKey) {
+    try {
+      const referenceId = await getSelectedVoiceId();
+      const body: Record<string, unknown> = {
+        text,
+        format: "mp3",
+        mp3_bitrate: 128,
+        latency: "normal",
+      };
+      if (referenceId) body.reference_id = referenceId;
+      const response = await fetch("https://api.fish.audio/v1/tts", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${fishApiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (response.ok) {
+        const ab = await response.arrayBuffer();
+        return Buffer.from(ab);
+      }
+    } catch {}
+  }
   try {
-    const referenceId = await getSelectedVoiceId();
-    const body: Record<string, unknown> = {
-      text,
-      format: "mp3",
-      mp3_bitrate: 128,
-      latency: "normal",
-    };
-    if (referenceId) body.reference_id = referenceId;
-
-    const response = await fetch("https://api.fish.audio/v1/tts", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!response.ok) return null;
-    const ab = await response.arrayBuffer();
-    return Buffer.from(ab);
+    const openaiVoice = await getOpenAIVoicePref();
+    const buf = await textToSpeech(text, openaiVoice as Parameters<typeof textToSpeech>[1], "mp3");
+    return buf;
   } catch {
     return null;
   }
@@ -104,8 +115,8 @@ router.post("/conversations/:id/messages", async (req, res) => {
 
     let fullResponse = "";
     const stream = await openai.chat.completions.create({
-      model: "gpt-5.4",
-      max_completion_tokens: 1024,
+      model: "gpt-5-mini",
+      max_completion_tokens: 512,
       messages: chatMessages,
       stream: true,
     });
@@ -120,7 +131,7 @@ router.post("/conversations/:id/messages", async (req, res) => {
 
     await db.insert(messages).values({ conversationId: id, role: "assistant", content: fullResponse });
 
-    const audioBuffer = await callFishAudioTts(fullResponse);
+    const audioBuffer = await callTts(fullResponse);
     if (audioBuffer) {
       send({ type: "audio", data: audioBuffer.toString("base64"), format: "mp3" });
     }
@@ -165,8 +176,8 @@ router.post("/conversations/:id/voice-messages", async (req, res) => {
 
     let fullResponse = "";
     const stream = await openai.chat.completions.create({
-      model: "gpt-5.4",
-      max_completion_tokens: 1024,
+      model: "gpt-5-mini",
+      max_completion_tokens: 512,
       messages: chatMessages,
       stream: true,
     });
@@ -181,7 +192,7 @@ router.post("/conversations/:id/voice-messages", async (req, res) => {
 
     await db.insert(messages).values({ conversationId: id, role: "assistant", content: fullResponse });
 
-    const audioOut = await callFishAudioTts(fullResponse);
+    const audioOut = await callTts(fullResponse);
     if (audioOut) {
       send({ type: "audio", data: audioOut.toString("base64"), format: "mp3" });
     }

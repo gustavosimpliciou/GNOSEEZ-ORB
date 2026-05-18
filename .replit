@@ -34,3 +34,8 @@ externalPort = 3001
 [[ports]]
 localPort = 21217
 externalPort = 80
+
+[userenv]
+
+[userenv.shared]
+FISH_AUDIO_API_KEY = "a677e11637b644c2ace2bbb5fe207513"

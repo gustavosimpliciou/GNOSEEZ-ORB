@@ -77,10 +77,13 @@ export default function AiChat({
   const [cloneStatus,    setCloneStatus]    = useState("");
 
   // ── Draggable / resizable state ──────────────────────────────────────────
+  const [isMinimized, setIsMinimized] = useState(false);
   const [pos,  setPos]  = useState<{ x: number; y: number } | null>(null);
+  const [iconPos, setIconPos] = useState<{ x: number; y: number } | null>(null);
   const [size, setSize] = useState({ w: isMobile ? 300 : 270, h: isMobile ? 220 : 300 });
 
   const dragState  = useRef<{ ox: number; oy: number; px: number; py: number } | null>(null);
+  const iconDragState = useRef<{ ox: number; oy: number; dragged: boolean } | null>(null);
   const resizeState= useRef<{ ox: number; oy: number; sw: number; sh: number } | null>(null);
   const panelRef   = useRef<HTMLDivElement>(null);
 
@@ -320,7 +323,10 @@ export default function AiChat({
         try {
           const blob = new Blob(chunksRef.current, { type: effectiveMime });
           const ab   = await blob.arrayBuffer();
-          const b64  = btoa(String.fromCharCode(...new Uint8Array(ab)));
+          const bytes1 = new Uint8Array(ab);
+          let bin1 = ""; const C = 8192;
+          for (let i = 0; i < bytes1.length; i += C) bin1 += String.fromCharCode(...bytes1.subarray(i, i + C));
+          const b64  = btoa(bin1);
           setIsLoading(true);
           try {
             const res = await fetch(`/api/openai/conversations/${conversationId}/voice-messages`, {
@@ -363,7 +369,10 @@ export default function AiChat({
         try {
           const blob = new Blob(cloneChunksRef.current, { type: effectiveMime });
           const ab   = await blob.arrayBuffer();
-          const b64  = btoa(String.fromCharCode(...new Uint8Array(ab)));
+          const bytes2 = new Uint8Array(ab);
+          let bin2 = ""; const C2 = 8192;
+          for (let i = 0; i < bytes2.length; i += C2) bin2 += String.fromCharCode(...bytes2.subarray(i, i + C2));
+          const b64  = btoa(bin2);
           const res = await fetch("/api/fish/voices/clone", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -408,8 +417,16 @@ export default function AiChat({
       ? ["masculin","male","homem","man","masc"]
       : ["feminin","female","mulher","woman","fem"];
     const match = voices.find(v => kw.some(k => v.name.toLowerCase().includes(k)));
-    if (match) await selectVoice(match.id);
-    else { setCloneName(gender === "male" ? "Voz Masculina" : "Voz Feminina"); setCloneStatus(`nenhuma voz ${gender === "male" ? "masculina" : "feminina"} — grave abaixo`); }
+    if (match) {
+      await selectVoice(match.id);
+    } else {
+      await fetch("/api/fish/voice-preference", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ gender }),
+      });
+      setCloneStatus(`✓ voz ${gender === "male" ? "masculina (onyx)" : "feminina (nova)"} ativa`);
+    }
   }, [voices, selectVoice]);
 
   // ── Styles ────────────────────────────────────────────────────────────────
@@ -468,6 +485,95 @@ export default function AiChat({
     { e:"nw", style:{ top:-4,    left:-4,  width:14, height:14,           cursor:"nw-resize" } as CSSProperties },
   ];
 
+  if (isMinimized) {
+    const fallback = pos ?? { x: window.innerWidth - size.w - 18, y: window.innerHeight - size.h - 82 };
+    const ip = iconPos ?? { x: fallback.x, y: fallback.y + size.h - 44 };
+
+    const onIconDragStart = (e: React.MouseEvent | React.TouchEvent) => {
+      e.preventDefault();
+      const cx = "touches" in e ? e.touches[0].clientX : e.clientX;
+      const cy = "touches" in e ? e.touches[0].clientY : e.clientY;
+      iconDragState.current = { ox: cx - ip.x, oy: cy - ip.y, dragged: false };
+
+      const onMove = (ev: MouseEvent | TouchEvent) => {
+        const mx = "touches" in ev ? (ev as TouchEvent).touches[0].clientX : (ev as MouseEvent).clientX;
+        const my = "touches" in ev ? (ev as TouchEvent).touches[0].clientY : (ev as MouseEvent).clientY;
+        if (!iconDragState.current) return;
+        iconDragState.current.dragged = true;
+        const nx = Math.max(0, Math.min(window.innerWidth - 44, mx - iconDragState.current.ox));
+        const ny = Math.max(0, Math.min(window.innerHeight - 44, my - iconDragState.current.oy));
+        setIconPos({ x: nx, y: ny });
+      };
+      const onUp = () => {
+        if (iconDragState.current && !iconDragState.current.dragged) {
+          setIsMinimized(false);
+        }
+        iconDragState.current = null;
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        window.removeEventListener("touchmove", onMove);
+        window.removeEventListener("touchend", onUp);
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+      window.addEventListener("touchmove", onMove, { passive: false });
+      window.addEventListener("touchend", onUp);
+    };
+
+    return (
+      <div
+        title="Arrastar / clique para abrir"
+        onMouseDown={onIconDragStart}
+        onTouchStart={onIconDragStart}
+        style={{
+          position: "fixed",
+          left: ip.x,
+          top: ip.y,
+          width: 44,
+          height: 44,
+          zIndex: 20,
+          background: T.bg,
+          border: isSpeaking ? `1px solid ${T.cyan}` : isRecording ? `1px solid ${T.green}` : `1px solid ${T.faint}`,
+          borderRadius: "50%",
+          cursor: "grab",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          boxShadow: isSpeaking ? `0 0 18px rgba(74,240,255,0.45)` : isRecording ? `0 0 18px rgba(0,255,100,0.45)` : `0 4px 18px rgba(0,0,0,0.55)`,
+          transition: "border-color 0.3s, box-shadow 0.3s",
+          fontFamily: MONO,
+          userSelect: "none",
+        }}
+      >
+        <span style={{
+          fontSize: 20,
+          userSelect: "none",
+          pointerEvents: "none",
+          animation: (isRecording || isSpeaking) ? "termPulse 1.1s ease-in-out infinite" : "none",
+          color: isSpeaking ? T.cyan : isRecording ? T.green : T.greenDim,
+        }}>⬡</span>
+        {(isRecording || isSpeaking) && (
+          <span style={{
+            position: "absolute",
+            top: -3, right: -3,
+            width: 9, height: 9,
+            borderRadius: "50%",
+            background: isSpeaking ? T.cyan : T.green,
+            boxShadow: isSpeaking ? `0 0 6px ${T.cyan}` : `0 0 6px ${T.green}`,
+            animation: "termPulse 0.9s ease-in-out infinite",
+            pointerEvents: "none",
+          }} />
+        )}
+        <style>{`
+          @keyframes termPulse {
+            0%,100% { opacity:1; transform:scale(1); }
+            50% { opacity:0.3; transform:scale(0.65); }
+          }
+        `}</style>
+      </div>
+    );
+  }
+
   return (
     <div ref={panelRef} style={panelStyle}>
       {/* Resize handles — all edges & corners */}
@@ -487,8 +593,19 @@ export default function AiChat({
           overflowY: "auto", scrollbarWidth: "none",
           boxShadow: "0 4px 24px rgba(0,0,0,0.6)",
         }}>
-          <div style={{ fontSize: 8, letterSpacing: "0.22em", color: T.greenDim, marginBottom: 10, textTransform: "uppercase" }}>
-            // VOICE_CONFIG
+          <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
+            <div style={{ flex: 1, fontSize: 8, letterSpacing: "0.22em", color: T.greenDim, textTransform: "uppercase" }}>
+              // VOICE_CONFIG
+            </div>
+            <button
+              onClick={() => setShowVoices(false)}
+              style={{
+                background: "none", border: "none", cursor: "pointer",
+                fontSize: 14, color: T.dim, padding: "0 2px", lineHeight: 1,
+                fontFamily: MONO, flexShrink: 0,
+              }}
+              title="Fechar"
+            >×</button>
           </div>
 
           {/* Male / Female quick-select */}
@@ -609,6 +726,18 @@ export default function AiChat({
             }} />
             <span style={{ fontSize: 7, letterSpacing: "0.18em", color: statusColor }}>{statusText}</span>
           </div>
+          {/* Minimize */}
+          <button
+            onClick={e => { e.stopPropagation(); setIsMinimized(true); }}
+            onMouseDown={e => e.stopPropagation()}
+            title="Minimizar"
+            style={{
+              background: "none", border: "1px solid transparent",
+              borderRadius: 3, cursor: "pointer",
+              padding: "2px 5px", color: T.dim,
+              fontSize: 13, lineHeight: 1, transition: "all 0.2s", fontFamily: MONO,
+            }}
+          >−</button>
           {/* Settings */}
           <button
             onClick={e => { e.stopPropagation(); setShowVoices(v => !v); }}
