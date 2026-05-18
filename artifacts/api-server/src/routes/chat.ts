@@ -188,10 +188,15 @@ router.post("/conversations/:id/messages", async (req, res) => {
       { role: "user" as const, content: userMsgContent },
     ];
 
+    // Use faster model for plain text; full model when a file is attached
+    const hasFile = !!(imageBase64 || fileText);
+    const model = hasFile ? "gpt-5" : "gpt-5-nano";
+    const maxTokens = hasFile ? 1024 : 512;
+
     let fullResponse = "";
     const stream = await openai.chat.completions.create({
-      model: "gpt-5",
-      max_completion_tokens: 1024,
+      model,
+      max_completion_tokens: maxTokens,
       messages: chatMessages as Parameters<typeof openai.chat.completions.create>[0]["messages"],
       stream: true,
     });
@@ -266,8 +271,8 @@ router.post("/conversations/:id/voice-messages", async (req, res) => {
 
     let fullResponse = "";
     const stream = await openai.chat.completions.create({
-      model: "gpt-5",
-      max_completion_tokens: 1024,
+      model: "gpt-5-mini",
+      max_completion_tokens: 512,
       messages: chatMessages,
       stream: true,
     });

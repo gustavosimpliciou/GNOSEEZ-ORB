@@ -47,8 +47,9 @@ const THRESHOLD     = 0.42;   // only react to medium-to-loud voice
 const NOISE_AMT     = 0.9;
 const NOISE_SPD     = 0.00030;
 const WAVE_DOTS     = 32;
-const MIN_ZOOM      = 0.48;
-const MAX_ZOOM      = 1.38;
+const MIN_ZOOM         = 0.22;
+const MAX_ZOOM         = 1.38;
+const MOBILE_INIT_ZOOM = 0.48;
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 const lerp  = (a: number, b: number, t: number) => {
@@ -196,8 +197,11 @@ export default function NeuralOrb() {
   const [aiSpeaking,  setAiSpeaking]  = useState(false);
   const [aiThinking,  setAiThinking]  = useState(false);
   void aiSpeaking;
-  const inputOrbColorRef  = useRef("#00ff64");
-  const outputOrbColorRef = useRef("#4af0ff");
+  const inputOrbColorRef     = useRef("#00ff64");
+  const outputOrbColorRef    = useRef("#4af0ff");
+  const chatPanelHeightRef   = useRef(Math.round(Math.min(window.innerHeight * 0.45, 360)));
+  const [listenOnly,  setListenOnly]  = useState(false);
+  const listenStreamRef = useRef<MediaStream | null>(null);
 
   // ── init particles ─────────────────────────────────────────────────────────
   const initParticles = useCallback((cx: number, cy: number) => {
@@ -242,6 +246,34 @@ export default function NeuralOrb() {
     } catch { setMicDenied(true); }
   }, []);
 
+  const toggleListenOnly = useCallback(async () => {
+    if (listenOnly) {
+      listenStreamRef.current?.getTracks().forEach(t => t.stop());
+      listenStreamRef.current = null;
+      S.current.analyser  = null;
+      S.current.dataArray = null;
+      setListenOnly(false);
+      setMicActive(false);
+    } else {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: {
+          echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+        }});
+        const ctx      = new AudioContext();
+        const src      = ctx.createMediaStreamSource(stream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0.28;
+        src.connect(analyser);
+        S.current.analyser  = analyser;
+        S.current.dataArray = new Uint8Array(analyser.frequencyBinCount);
+        listenStreamRef.current = stream;
+        setListenOnly(true);
+        setMicActive(true);
+      } catch { setMicDenied(true); }
+    }
+  }, [listenOnly]);
+
   const updateColor = useCallback((hex: string) => {
     setAccentColor(hex);
     S.current.accentColor = hex;
@@ -268,15 +300,17 @@ export default function NeuralOrb() {
 
     const getFitZoom = (W: number, H: number) => {
       const minDim = Math.min(W, H);
-      if (minDim < 500) return MIN_ZOOM; // start fully zoomed-out on mobile
+      if (minDim < 500) return MOBILE_INIT_ZOOM; // start at default zoom on mobile (can pinch/scroll further)
       return 1.0;
     };
 
     const resize = () => {
       canvas.width  = window.innerWidth;
       canvas.height = window.innerHeight;
-      initParticles(canvas.width / 2, canvas.height / 2);
-      setIsMobile(window.innerWidth < 680);
+      const mobile = window.innerWidth < 680;
+      const orbCy  = mobile ? canvas.height * 0.32 : canvas.height / 2;
+      initParticles(canvas.width / 2, orbCy);
+      setIsMobile(mobile);
       const fit = getFitZoom(canvas.width, canvas.height);
       // Always apply fit on resize (user can still pinch-zoom after)
       zoomRef.current = fit;
@@ -357,6 +391,19 @@ export default function NeuralOrb() {
 
       const isDark = darkRef.current;
       const W  = canvas.width, H = canvas.height;
+
+      // On mobile, smoothly move orb Y toward center of space above the chat panel
+      if (W < 680) {
+        const chatH = chatPanelHeightRef.current;
+        // Minimum cy: keep orb below the controls bar (top≈72, height≈38) + orb radius + gap
+        const minCy = 115 + RADIUS * Math.min(zoomRef.current, 0.55);
+        const rawTargetCy = chatH > 0
+          ? (H - chatH - 10) / 2   // center of area above chat (10 = bottom margin)
+          : H / 2;                  // fully centered when minimized
+        const targetCy = Math.max(rawTargetCy, minCy);
+        s.cy = lerp(s.cy, targetCy, 0.045 * dt);
+      }
+
       const { cx, cy } = s;
       const t  = s.time;
       const zoom = zoomRef.current;
@@ -961,7 +1008,7 @@ export default function NeuralOrb() {
           style={{ width: isMobile ? 28 : 34, height: isMobile ? 28 : 34, objectFit:"contain", display:"block" }}
         />
         <div>
-          <div style={{ fontSize: isMobile ? 10 : 12, fontWeight:700, letterSpacing:"0.20em", color: svgC }}>GNOSEEZ ORB</div>
+          <div style={{ fontSize: isMobile ? 10 : 12, fontWeight:700, letterSpacing:"0.20em", color: svgC }}>GNOSEEZ</div>
           {!isMobile && <div style={{ fontSize:7, letterSpacing:"0.22em", color: fg40, marginTop:2 }}>{tr.subtitle}</div>}
         </div>
       </div>
@@ -1077,7 +1124,7 @@ export default function NeuralOrb() {
       {/* ── CONTROLS: color · lang · dark ────────────────────────────────── */}
       <div style={{
         position:"absolute",
-        top: isMobile ? 52 : 24,
+        top: isMobile ? 72 : 24,
         left:"50%",
         transform:"translateX(-50%)",
         zIndex:20,
@@ -1112,6 +1159,31 @@ export default function NeuralOrb() {
               padding:"2px 3px", lineHeight:1, fontFamily:"inherit",
             }}>{l==='pt'?'PT':l==='en'?'EN':'ES'}</button>
           ))}
+
+          <span style={{ width:1, height:12, background: fg08, display:"block" }}/>
+
+          {/* Listen-only toggle */}
+          <button
+            onClick={toggleListenOnly}
+            title={listenOnly ? "Desativar escuta" : "Escuta reativa (sem resposta)"}
+            style={{
+              background: listenOnly ? `rgba(${cr},${cg},${cb},0.18)` : "none",
+              border: `1px solid ${listenOnly ? accent : fg08}`,
+              borderRadius: 16, cursor: "pointer",
+              padding: isMobile ? "3px 7px" : "3px 8px",
+              color: listenOnly ? accent : fg40,
+              fontFamily:"inherit", transition:"all 0.25s",
+              display:"flex", alignItems:"center", gap:3,
+            }}
+          >
+            <svg width="8" height="10" viewBox="0 0 12 16" fill="currentColor" style={{ flexShrink:0 }}>
+              <rect x="3" y="0" width="6" height="10" rx="3"/>
+              <path d="M1 7c0 3.3 2.7 5 5 5s5-1.7 5-5" stroke="currentColor" strokeWidth="1.3" fill="none" strokeLinecap="round"/>
+              <line x1="6" y1="12" x2="6" y2="15" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+              <line x1="3.5" y1="15" x2="8.5" y2="15" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+            </svg>
+            {!isMobile && <span style={{ fontSize:7, letterSpacing:"0.12em" }}>{listenOnly ? "ON" : "MIC"}</span>}
+          </button>
 
           <span style={{ width:1, height:12, background: fg08, display:"block" }}/>
 
@@ -1226,6 +1298,7 @@ export default function NeuralOrb() {
         onInputColorChange={color => { inputOrbColorRef.current = color; }}
         onOutputColorChange={color => { outputOrbColorRef.current = color; }}
         onAiThinking={setAiThinking}
+        onChatHeightChange={h => { chatPanelHeightRef.current = h; }}
       />
 
       <style>{`

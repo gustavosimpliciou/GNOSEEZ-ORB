@@ -35,6 +35,7 @@ type Props = {
   onInputColorChange: (color: string) => void;
   onOutputColorChange: (color: string) => void;
   onAiThinking?: (v: boolean) => void;
+  onChatHeightChange?: (height: number) => void;
 };
 
 const MONO = "'JetBrains Mono','SF Mono','Fira Code','Courier New',monospace";
@@ -64,6 +65,7 @@ export default function AiChat({
   onInputColorChange,
   onOutputColorChange,
   onAiThinking,
+  onChatHeightChange,
 }: Props) {
   void isDark;
 
@@ -79,12 +81,16 @@ export default function AiChat({
   const [inputColor,     setInputColor]     = useState("#00ff64");
   const [outputColor,    setOutputColor]    = useState("#4af0ff");
   const [voiceStatus,    setVoiceStatus]    = useState("");
+  const [bgOpacity,      setBgOpacity]      = useState(0.97);
 
   // ── Draggable / resizable state ──────────────────────────────────────────
   const [isMinimized, setIsMinimized] = useState(false);
   const [pos,  setPos]  = useState<{ x: number; y: number } | null>(null);
   const [iconPos, setIconPos] = useState<{ x: number; y: number } | null>(null);
-  const [size, setSize] = useState({ w: isMobile ? 300 : 270, h: isMobile ? 220 : 300 });
+  const [size, setSize] = useState(() => ({
+    w: isMobile ? 300 : 270,
+    h: isMobile ? Math.round(Math.min(window.innerHeight * 0.45, 360)) : 300,
+  }));
 
   const dragState        = useRef<{ ox: number; oy: number; px: number; py: number } | null>(null);
   const iconDragState    = useRef<{ ox: number; oy: number; dragged: boolean } | null>(null);
@@ -111,7 +117,30 @@ export default function AiChat({
   const clampY = (y: number) => Math.max(0, Math.min(window.innerHeight - size.h, y));
 
   const onDragStart = useCallback((e: React.MouseEvent | React.TouchEvent) => {
-    if (isMobile) return;
+    if (isMobile) {
+      // Mobile: drag header up/down to resize chat height
+      e.preventDefault();
+      const startY = "touches" in e ? e.touches[0].clientY : e.clientY;
+      const startH = size.h;
+      const onMove = (ev: MouseEvent | TouchEvent) => {
+        const cy = "touches" in ev ? (ev as TouchEvent).touches[0].clientY : (ev as MouseEvent).clientY;
+        const dy = cy - startY;
+        // drag down = shrink (panel anchored at bottom, top moves down)
+        const newH = Math.max(MIN_H, Math.min(MAX_H, startH - dy));
+        setSize(prev => ({ ...prev, h: newH }));
+      };
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        window.removeEventListener("touchmove", onMove);
+        window.removeEventListener("touchend", onUp);
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+      window.addEventListener("touchmove", onMove, { passive: false });
+      window.addEventListener("touchend", onUp);
+      return;
+    }
     e.preventDefault();
     const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
     const clientY = "touches" in e ? e.touches[0].clientY : e.clientY;
@@ -174,6 +203,11 @@ export default function AiChat({
   }, [pos, size.w, size.h]);
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+
+  // Notify parent of effective chat height (0 when minimized)
+  useEffect(() => {
+    onChatHeightChange?.(isMinimized ? 0 : size.h);
+  }, [size.h, isMinimized]); // eslint-disable-line
 
   // ── Init conversation ────────────────────────────────────────────────────
   useEffect(() => {
@@ -287,9 +321,21 @@ export default function AiChat({
   }, []);
 
   // ── Send text ────────────────────────────────────────────────────────────
+  const conversationIdRef = useRef<number | null>(null);
+  useEffect(() => { conversationIdRef.current = conversationId; }, [conversationId]);
+
   const sendText = useCallback(async () => {
     if (!input.trim() && !attachedFile || isLoading) return;
-    if (!conversationId) { console.warn("Aguardando conexão com o servidor..."); return; }
+    let cid = conversationIdRef.current;
+    if (!cid) {
+      // Wait up to 5s for the conversation to be created
+      for (let i = 0; i < 25; i++) {
+        await new Promise(r => setTimeout(r, 200));
+        cid = conversationIdRef.current;
+        if (cid) break;
+      }
+      if (!cid) { console.warn("Servidor indisponível"); return; }
+    }
     const content = input.trim();
     const file = attachedFile;
     setInput("");
@@ -311,7 +357,7 @@ export default function AiChat({
         body.fileText = file.text;
         body.fileName = file.name;
       }
-      const res = await fetch(`/api/openai/conversations/${conversationId}/messages`, {
+      const res = await fetch(`/api/openai/conversations/${cid}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -319,7 +365,7 @@ export default function AiChat({
       if (res.body) await processStream(res.body.getReader());
     } catch (e) { console.error(e); }
     finally { setIsLoading(false); onAiThinking?.(false); }
-  }, [input, attachedFile, conversationId, isLoading, processStream, onAiThinking]);
+  }, [input, attachedFile, isLoading, processStream, onAiThinking]);
 
   // ── Voice recording ──────────────────────────────────────────────────────
   const toggleRecording = useCallback(async () => {
@@ -349,7 +395,8 @@ export default function AiChat({
         chatRecordingAnalyserRef.current = null;
         recordingRef.current = false;
         setIsRecording(false);
-        if (!conversationId || chunksRef.current.length === 0) return;
+        const cid = conversationIdRef.current;
+        if (!cid || chunksRef.current.length === 0) return;
         try {
           const blob  = new Blob(chunksRef.current, { type: effectiveMime });
           const ab    = await blob.arrayBuffer();
@@ -359,7 +406,7 @@ export default function AiChat({
           setIsLoading(true);
           onAiThinking?.(true);
           try {
-            const res = await fetch(`/api/openai/conversations/${conversationId}/voice-messages`, {
+            const res = await fetch(`/api/openai/conversations/${cid}/voice-messages`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ audio: btoa(bin) }),
@@ -373,7 +420,7 @@ export default function AiChat({
       recordingRef.current = true;
       setIsRecording(true);
     } catch (e) { console.error("Mic:", e); }
-  }, [isRecording, conversationId, processStream, recordingRef, chatRecordingAnalyserRef]);
+  }, [isRecording, processStream, recordingRef, chatRecordingAnalyserRef]);
 
   // ── Voice gender select ──────────────────────────────────────────────────
   const selectByGender = useCallback(async (gender: "male" | "female") => {
@@ -400,21 +447,34 @@ export default function AiChat({
   // ── Styles ────────────────────────────────────────────────────────────────
   const currentPos = pos ?? { x: window.innerWidth - size.w - 18, y: window.innerHeight - size.h - 82 };
 
+  const bgColor = `rgba(3, 7, 14, ${bgOpacity})`;
+  // When background is very transparent (40–50%), switch text to dark so it stays legible
+  const isLowOpacity = bgOpacity <= 0.50;
+  const textPrimary  = isLowOpacity ? "rgba(5, 20, 10, 0.92)"  : T.white;
+  const textDim      = isLowOpacity ? "rgba(10, 40, 20, 0.75)"  : T.dim;
+  const textGreen    = isLowOpacity ? "rgba(0, 100, 40, 0.90)"  : T.green;
+  const textGreenDim = isLowOpacity ? "rgba(0, 80, 30, 0.80)"   : T.greenDim;
+  const textCyan     = isLowOpacity ? "rgba(0, 80, 100, 0.90)"  : T.cyan;
+
   const termBorder = isRecording ? `1px solid ${inputColor}` : isSpeaking ? `1px solid ${outputColor}` : `1px solid ${T.faint}`;
   const termGlow   = isRecording ? `0 0 20px ${inputColor}44` : isSpeaking ? `0 0 20px ${outputColor}44` : `0 4px 28px rgba(0,0,0,0.65)`;
 
   const statusText  = isRecording ? "OUVINDO" : isSpeaking ? "FALANDO" : isLoading ? "..." : "ONLINE";
-  const statusColor = isRecording ? inputColor : isSpeaking ? outputColor : T.greenDim;
+  const statusColor = isRecording ? inputColor : isSpeaking ? outputColor : textGreenDim;
 
-  const MOBILE_PANEL_H = Math.round(Math.min(window.innerHeight * 0.50, 380));
+  const MOBILE_MARGIN  = 10;
 
   const panelStyle: CSSProperties = isMobile ? {
-    position: "fixed", left: 0, bottom: 0, right: 0,
-    width: "100%", height: MOBILE_PANEL_H,
+    position: "fixed",
+    left: MOBILE_MARGIN, right: MOBILE_MARGIN,
+    bottom: MOBILE_MARGIN,
+    width: `calc(100% - ${MOBILE_MARGIN * 2}px)`,
+    height: size.h,
     zIndex: 20,
     pointerEvents: "auto", fontFamily: MONO,
     display: "flex", flexDirection: "column", gap: 0,
     userSelect: "none", overflow: "visible",
+    borderRadius: 10,
   } : {
     position: "fixed", left: currentPos.x, top: currentPos.y,
     width: size.w, height: size.h, zIndex: 20,
@@ -673,22 +733,22 @@ export default function AiChat({
       {/* ── Settings Panel ────────────────────────────────────────────────── */}
       {showSettings && (
         <div style={{
-          background: T.bg, border: `1px solid ${T.faint}`,
+          background: bgColor, border: `1px solid ${T.faint}`,
           borderRadius: 6, padding: "10px 12px",
           flexShrink: 0, boxShadow: "0 4px 24px rgba(0,0,0,0.6)",
         }}>
           <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
-            <div style={{ flex: 1, fontSize: 8, letterSpacing: "0.22em", color: T.greenDim, textTransform: "uppercase" }}>
+            <div style={{ flex: 1, fontSize: 8, letterSpacing: "0.22em", color: textGreenDim, textTransform: "uppercase" }}>
               // CONFIG
             </div>
             <button onClick={() => setShowSettings(false)} style={{
               background: "none", border: "none", cursor: "pointer",
-              fontSize: 14, color: T.dim, padding: "0 2px", lineHeight: 1, fontFamily: MONO,
+              fontSize: 14, color: textDim, padding: "0 2px", lineHeight: 1, fontFamily: MONO,
             }}>×</button>
           </div>
 
           {/* Voice gender */}
-          <div style={{ fontSize: 7, color: T.dim, marginBottom: 5, letterSpacing: "0.14em", textTransform: "uppercase" }}>voz</div>
+          <div style={{ fontSize: 7, color: textDim, marginBottom: 5, letterSpacing: "0.14em", textTransform: "uppercase" }}>voz</div>
           <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
             {(["male","female"] as const).map(g => (
               <button key={g} onClick={() => selectByGender(g)} style={{
@@ -704,7 +764,7 @@ export default function AiChat({
             ))}
           </div>
           {voiceStatus && (
-            <div style={{ fontSize: 7.5, color: T.greenDim, marginBottom: 8, letterSpacing: "0.05em" }}>
+            <div style={{ fontSize: 7.5, color: textGreenDim, marginBottom: 8, letterSpacing: "0.05em" }}>
               {voiceStatus}
             </div>
           )}
@@ -712,37 +772,56 @@ export default function AiChat({
           <div style={{ borderTop: `1px solid ${T.faint}`, margin: "4px 0 10px" }} />
 
           {/* Orb colors */}
-          <div style={{ fontSize: 7, color: T.dim, marginBottom: 8, letterSpacing: "0.14em", textTransform: "uppercase" }}>cor do orb</div>
+          <div style={{ fontSize: 7, color: textDim, marginBottom: 8, letterSpacing: "0.14em", textTransform: "uppercase" }}>cor do orb</div>
 
           {/* Input color */}
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-            <div style={{ fontSize: 8, color: T.dim, letterSpacing: "0.08em", flex: 1 }}>Entrada</div>
+            <div style={{ fontSize: 8, color: textDim, letterSpacing: "0.08em", flex: 1 }}>Entrada</div>
             <input
               type="color"
               value={inputColor}
               onChange={e => handleInputColor(e.target.value)}
               style={{ width: 28, height: 20, border: "none", background: "none", cursor: "pointer", padding: 0 }}
             />
-            <span style={{ fontSize: 8, color: T.dim, fontFamily: "monospace", width: 52 }}>{inputColor}</span>
+            <span style={{ fontSize: 8, color: textDim, fontFamily: "monospace", width: 52 }}>{inputColor}</span>
           </div>
 
           {/* Output color */}
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <div style={{ fontSize: 8, color: T.dim, letterSpacing: "0.08em", flex: 1 }}>Saída</div>
+            <div style={{ fontSize: 8, color: textDim, letterSpacing: "0.08em", flex: 1 }}>Saída</div>
             <input
               type="color"
               value={outputColor}
               onChange={e => handleOutputColor(e.target.value)}
               style={{ width: 28, height: 20, border: "none", background: "none", cursor: "pointer", padding: 0 }}
             />
-            <span style={{ fontSize: 8, color: T.dim, fontFamily: "monospace", width: 52 }}>{outputColor}</span>
+            <span style={{ fontSize: 8, color: textDim, fontFamily: "monospace", width: 52 }}>{outputColor}</span>
+          </div>
+
+          <div style={{ borderTop: `1px solid ${T.faint}`, margin: "10px 0 10px" }} />
+
+          {/* Background opacity */}
+          <div style={{ fontSize: 7, color: textDim, marginBottom: 8, letterSpacing: "0.14em", textTransform: "uppercase" }}>opacidade do fundo</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="range"
+              min={40}
+              max={97}
+              value={Math.round(bgOpacity * 100)}
+              onChange={e => setBgOpacity(parseInt(e.target.value) / 100)}
+              onMouseDown={e => e.stopPropagation()}
+              style={{ flex: 1, accentColor: textGreen, cursor: "pointer", height: 3 }}
+            />
+            <span style={{ fontSize: 8, color: textDim, fontFamily: "monospace", width: 28, textAlign: "right" }}>
+              {Math.round(bgOpacity * 100)}%
+            </span>
           </div>
         </div>
       )}
 
       {/* ── Terminal Main Panel ────────────────────────────────────────────── */}
       <div style={{
-        background: T.bg, border: termBorder,
+        background: bgColor, border: termBorder,
         borderRadius: 6, boxShadow: termGlow,
         flex: 1, display: "flex", flexDirection: "column",
         overflow: "hidden", transition: "border-color 0.3s, box-shadow 0.3s",
@@ -755,19 +834,28 @@ export default function AiChat({
           onTouchStart={onDragStart}
           style={{
             display: "flex", alignItems: "center", gap: 8,
-            padding: "6px 10px",
+            padding: isMobile ? "10px 10px 6px" : "6px 10px",
             borderBottom: `1px solid ${T.faint}`,
             flexShrink: 0,
             background: "rgba(0,255,100,0.025)",
-            cursor: "grab",
+            cursor: isMobile ? "n-resize" : "grab",
+            position: "relative",
           }}
         >
+          {/* Drag-to-resize pill — mobile only */}
+          {isMobile && (
+            <div style={{
+              position: "absolute", top: 4, left: "50%", transform: "translateX(-50%)",
+              width: 34, height: 3, borderRadius: 2,
+              background: "rgba(0,255,100,0.32)", pointerEvents: "none",
+            }} />
+          )}
           <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
             {["#ff5f57","#ffbd2e","#28c840"].map((c, i) => (
               <div key={i} style={{ width: 6, height: 6, borderRadius: "50%", background: c }} />
             ))}
           </div>
-          <div style={{ flex: 1, fontSize: 7.5, letterSpacing: "0.20em", color: T.greenDim, textTransform: "uppercase" }}>
+          <div style={{ flex: 1, fontSize: 7.5, letterSpacing: "0.20em", color: textGreenDim, textTransform: "uppercase" }}>
             neural-orb ~ ai
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
@@ -782,7 +870,7 @@ export default function AiChat({
           <button
             onClick={e => { e.stopPropagation(); setIsMinimized(true); }}
             onMouseDown={e => e.stopPropagation()}
-            style={{ background:"none", border:"1px solid transparent", borderRadius:3, cursor:"pointer", padding:"2px 5px", color:T.dim, fontSize:13, lineHeight:1, transition:"all 0.2s", fontFamily:MONO }}
+            style={{ background:"none", border:"1px solid transparent", borderRadius:3, cursor:"pointer", padding:"2px 5px", color:textDim, fontSize:13, lineHeight:1, transition:"all 0.2s", fontFamily:MONO }}
           >−</button>
           <button
             onClick={e => { e.stopPropagation(); setShowSettings(v => !v); }}
@@ -791,7 +879,7 @@ export default function AiChat({
               background: showSettings ? "rgba(0,255,100,0.10)" : "none",
               border: showSettings ? `1px solid ${T.greenFaint}` : "1px solid transparent",
               borderRadius: 3, cursor: "pointer", padding: "2px 5px",
-              color: showSettings ? T.green : T.dim,
+              color: showSettings ? textGreen : textDim,
               fontSize: 11, lineHeight: 1, transition: "all 0.2s", fontFamily: MONO,
             }}
           >⚙</button>
@@ -802,9 +890,9 @@ export default function AiChat({
           <div className="orb-scroll" style={{ height: "100%", overflowY: "auto", scrollbarWidth: "thin", scrollbarColor: `${inputColor}30 transparent`, padding: "6px 0 4px" }}>
 
             {messages.length === 0 && !isLoading && (
-              <div style={{ padding: "4px 10px", color: T.dim, fontSize: 9, lineHeight: 1.7 }}>
+              <div style={{ padding: "4px 10px", color: textDim, fontSize: 9, lineHeight: 1.7 }}>
                 <span style={{ color: T.greenFaint }}>$</span> pronto. fale ou escreva...<br />
-                <span style={{ color: "rgba(80,120,160,0.55)", fontSize: 8 }}>orb reage a voz média/alta</span>
+                <span style={{ color: isLowOpacity ? "rgba(20,60,30,0.55)" : "rgba(80,120,160,0.55)", fontSize: 8 }}>orb reage a voz média/alta</span>
               </div>
             )}
 
@@ -820,8 +908,8 @@ export default function AiChat({
                 ) : (
                   <div>
                     <span style={{ color: outputColor, fontSize: 8, letterSpacing: "0.10em", opacity: 0.75 }}>ORB </span>
-                    <span style={{ color: T.dim, fontSize: 8 }}>~</span>
-                    <span style={{ fontSize: 10, lineHeight: 1.6, color: T.white, letterSpacing: "0.01em", wordBreak: "break-word", marginLeft: 4, userSelect: "text" }}>
+                    <span style={{ color: textDim, fontSize: 8 }}>~</span>
+                    <span style={{ fontSize: 10, lineHeight: 1.6, color: textPrimary, letterSpacing: "0.01em", wordBreak: "break-word", marginLeft: 4, userSelect: "text" }}>
                       {msg.content}
                       {msg.streaming && <span style={{ opacity: 0.6, marginLeft: 2, color: outputColor, animation: "termBlink 1s step-end infinite" }}>▌</span>}
                     </span>
@@ -873,11 +961,11 @@ export default function AiChat({
               ) : (
                 <span style={{ fontSize: 11, flexShrink: 0 }}>{attachedFile.kind === "pdf" ? "📄" : "📝"}</span>
               )}
-              <span style={{ fontSize: 8, color: T.dim, letterSpacing: "0.04em", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <span style={{ fontSize: 8, color: textDim, letterSpacing: "0.04em", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {attachedFile.name}
               </span>
               <button onClick={() => setAttachedFile(null)} onMouseDown={e => e.stopPropagation()}
-                style={{ background: "none", border: "none", cursor: "pointer", color: T.dim, fontSize: 12, padding: "0 2px", lineHeight: 1, flexShrink: 0 }}>×</button>
+                style={{ background: "none", border: "none", cursor: "pointer", color: textDim, fontSize: 12, padding: "0 2px", lineHeight: 1, flexShrink: 0 }}>×</button>
             </div>
           )}
 
@@ -892,7 +980,7 @@ export default function AiChat({
                 background: attachedFile ? `${inputColor}20` : "none",
                 border: `1px solid ${attachedFile ? inputColor : T.faint}`,
                 borderRadius: 4, cursor: "pointer", flexShrink: 0,
-                padding: "5px 6px", color: attachedFile ? inputColor : T.dim,
+                padding: "5px 6px", color: attachedFile ? inputColor : textDim,
                 lineHeight: 0, transition: "all 0.2s",
               }}
             >
@@ -934,7 +1022,7 @@ export default function AiChat({
                 borderRadius: 4, flexShrink: 0, lineHeight: 0,
                 cursor: (input.trim() || attachedFile) && !isLoading ? "pointer" : "not-allowed",
                 padding: "5px 7px",
-                color: (input.trim() || attachedFile) && !isLoading ? inputColor : T.dim,
+                color: (input.trim() || attachedFile) && !isLoading ? inputColor : textDim,
                 transition: "all 0.2s",
                 opacity: (!input.trim() && !attachedFile) || isLoading ? 0.4 : 1,
               }}
@@ -966,7 +1054,7 @@ export default function AiChat({
               background: isRecording
                 ? `radial-gradient(circle at center, ${inputColor}20 0%, transparent 70%)`
                 : "rgba(0,0,0,0.35)",
-              color: isRecording ? inputColor : T.dim,
+              color: isRecording ? inputColor : textDim,
               cursor: (isLoading && !isRecording) ? "not-allowed" : "pointer",
               display: "flex", alignItems: "center", justifyContent: "center",
               boxShadow: isRecording
