@@ -193,7 +193,8 @@ export default function NeuralOrb() {
   const aiAnalyserRef  = useRef<{ node: AnalyserNode; data: Uint8Array } | null>(null) as MutableRefObject<{ node: AnalyserNode; data: Uint8Array } | null>;
   const chatRecordingAnalyserRef = useRef<{ node: AnalyserNode; data: Uint8Array } | null>(null) as MutableRefObject<{ node: AnalyserNode; data: Uint8Array } | null>;
   const aiRecordingRef = useRef(false) as MutableRefObject<boolean>;
-  const [aiSpeaking, setAiSpeaking] = useState(false);
+  const [aiSpeaking,  setAiSpeaking]  = useState(false);
+  const [aiThinking,  setAiThinking]  = useState(false);
   void aiSpeaking;
   const inputOrbColorRef  = useRef("#00ff64");
   const outputOrbColorRef = useRef("#4af0ff");
@@ -1179,6 +1180,42 @@ export default function NeuralOrb() {
 
 
       {/* ── AI CHAT PANEL ─────────────────────────────────────────────────── */}
+      {/* ── AI THINKING INDICATOR ─────────────────────────────────────────── */}
+      {aiThinking && (
+        <div style={{
+          position: "absolute",
+          top: "28%",
+          left: "50%",
+          transform: "translateX(-50%)",
+          zIndex: 15,
+          pointerEvents: "none",
+          display: "flex",
+          alignItems: "center",
+          gap: 7,
+          padding: "6px 14px",
+          background: "rgba(3,7,14,0.80)",
+          border: `1px solid ${accent}50`,
+          borderRadius: 20,
+          backdropFilter: "blur(10px)",
+          boxShadow: `0 0 18px ${accent}22`,
+        }}>
+          <span style={{
+            fontSize: 7.5, letterSpacing: "0.22em",
+            color: accent, textTransform: "uppercase",
+            fontFamily: "'JetBrains Mono','Courier New',monospace",
+            opacity: 0.9,
+          }}>pensando</span>
+          {[0,1,2].map(i => (
+            <span key={i} style={{
+              width: 3, height: 3, borderRadius: "50%",
+              background: accent, display: "inline-block",
+              animation: `pulse-dot 1.1s ease-in-out ${i * 0.22}s infinite`,
+            }} />
+          ))}
+        </div>
+      )}
+
+      {/* ── AI CHAT PANEL ─────────────────────────────────────────────────── */}
       <AiChat
         isDark={dm}
         isMobile={isMobile}
@@ -1188,6 +1225,7 @@ export default function NeuralOrb() {
         recordingRef={aiRecordingRef}
         onInputColorChange={color => { inputOrbColorRef.current = color; }}
         onOutputColorChange={color => { outputOrbColorRef.current = color; }}
+        onAiThinking={setAiThinking}
       />
 
       <style>{`

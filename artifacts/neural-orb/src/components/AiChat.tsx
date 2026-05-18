@@ -14,6 +14,15 @@ type ChatMessage = {
   streaming?: boolean;
 };
 
+type AttachedFile = {
+  name: string;
+  kind: "image" | "pdf" | "text";
+  mimeType: string;
+  base64?: string;
+  text?: string;
+  previewUrl?: string;
+};
+
 type AiAnalyser = { node: AnalyserNode; data: Uint8Array };
 
 type Props = {
@@ -25,6 +34,7 @@ type Props = {
   recordingRef: MutableRefObject<boolean>;
   onInputColorChange: (color: string) => void;
   onOutputColorChange: (color: string) => void;
+  onAiThinking?: (v: boolean) => void;
 };
 
 const MONO = "'JetBrains Mono','SF Mono','Fira Code','Courier New',monospace";
@@ -53,11 +63,14 @@ export default function AiChat({
   recordingRef,
   onInputColorChange,
   onOutputColorChange,
+  onAiThinking,
 }: Props) {
   void isDark;
 
   const [messages,       setMessages]       = useState<ChatMessage[]>([]);
   const [input,          setInput]          = useState("");
+  const [attachedFile,   setAttachedFile]   = useState<AttachedFile | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [conversationId, setConversationId] = useState<number | null>(null);
   const [isLoading,      setIsLoading]      = useState(false);
   const [isRecording,    setIsRecording]    = useState(false);
@@ -73,9 +86,11 @@ export default function AiChat({
   const [iconPos, setIconPos] = useState<{ x: number; y: number } | null>(null);
   const [size, setSize] = useState({ w: isMobile ? 300 : 270, h: isMobile ? 220 : 300 });
 
-  const dragState      = useRef<{ ox: number; oy: number; px: number; py: number } | null>(null);
-  const iconDragState  = useRef<{ ox: number; oy: number; dragged: boolean } | null>(null);
-  const resizeState    = useRef<{ ox: number; oy: number; sw: number; sh: number } | null>(null);
+  const dragState        = useRef<{ ox: number; oy: number; px: number; py: number } | null>(null);
+  const iconDragState    = useRef<{ ox: number; oy: number; dragged: boolean } | null>(null);
+  const resizeState      = useRef<{ ox: number; oy: number; sw: number; sh: number } | null>(null);
+  const iconClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const iconClickCountRef = useRef(0);
   const panelRef       = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const audioCtxRef    = useRef<AudioContext | null>(null);
@@ -96,6 +111,7 @@ export default function AiChat({
   const clampY = (y: number) => Math.max(0, Math.min(window.innerHeight - size.h, y));
 
   const onDragStart = useCallback((e: React.MouseEvent | React.TouchEvent) => {
+    if (isMobile) return;
     e.preventDefault();
     const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
     const clientY = "touches" in e ? e.touches[0].clientY : e.clientY;
@@ -238,24 +254,72 @@ export default function AiChat({
     }
   }, [playAiAudio]);
 
+  // ── File reading ─────────────────────────────────────────────────────────
+  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+    const isImage = file.type.startsWith("image/");
+    const isPdf   = file.type === "application/pdf";
+    if (isImage) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result as string;
+        setAttachedFile({ name: file.name, kind: "image", mimeType: file.type, base64: dataUrl.split(",")[1], previewUrl: dataUrl });
+      };
+      reader.readAsDataURL(file);
+    } else if (isPdf) {
+      const textReader = new FileReader();
+      textReader.onload = () => {
+        const raw = textReader.result as string;
+        const cleaned = raw.replace(/[^\x20-\x7E\n\r\t\u00C0-\u024F]/g, " ").replace(/\s{4,}/g, "\n").trim();
+        const readable = cleaned.length > 80;
+        setAttachedFile({ name: file.name, kind: "pdf", mimeType: file.type, text: readable ? cleaned.slice(0, 12000) : undefined });
+      };
+      textReader.readAsText(file, "utf-8");
+    } else {
+      const reader = new FileReader();
+      reader.onload = () => {
+        setAttachedFile({ name: file.name, kind: "text", mimeType: file.type, text: reader.result as string });
+      };
+      reader.readAsText(file);
+    }
+  }, []);
+
   // ── Send text ────────────────────────────────────────────────────────────
   const sendText = useCallback(async () => {
-    if (!input.trim() || isLoading) return;
+    if (!input.trim() && !attachedFile || isLoading) return;
     if (!conversationId) { console.warn("Aguardando conexão com o servidor..."); return; }
     const content = input.trim();
+    const file = attachedFile;
     setInput("");
+    setAttachedFile(null);
     setIsLoading(true);
-    setMessages(p => [...p, { id: crypto.randomUUID(), role: "user", content }]);
+    onAiThinking?.(true);
+    const displayContent = content || (file ? `📎 ${file.name}` : "");
+    setMessages(p => [...p, { id: crypto.randomUUID(), role: "user", content: displayContent }]);
     try {
+      const body: Record<string, unknown> = { content };
+      if (file?.kind === "image") {
+        body.imageBase64 = file.base64;
+        body.imageMimeType = file.mimeType;
+        body.fileName = file.name;
+      } else if (file?.kind === "pdf") {
+        if (file.text) body.fileText = file.text;
+        body.fileName = file.name;
+      } else if (file?.kind === "text") {
+        body.fileText = file.text;
+        body.fileName = file.name;
+      }
       const res = await fetch(`/api/openai/conversations/${conversationId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content }),
+        body: JSON.stringify(body),
       });
       if (res.body) await processStream(res.body.getReader());
     } catch (e) { console.error(e); }
-    finally { setIsLoading(false); }
-  }, [input, conversationId, isLoading, processStream]);
+    finally { setIsLoading(false); onAiThinking?.(false); }
+  }, [input, attachedFile, conversationId, isLoading, processStream, onAiThinking]);
 
   // ── Voice recording ──────────────────────────────────────────────────────
   const toggleRecording = useCallback(async () => {
@@ -293,6 +357,7 @@ export default function AiChat({
           let bin = ""; const C = 8192;
           for (let i = 0; i < bytes.length; i += C) bin += String.fromCharCode(...bytes.subarray(i, i + C));
           setIsLoading(true);
+          onAiThinking?.(true);
           try {
             const res = await fetch(`/api/openai/conversations/${conversationId}/voice-messages`, {
               method: "POST",
@@ -300,8 +365,8 @@ export default function AiChat({
               body: JSON.stringify({ audio: btoa(bin) }),
             });
             if (res.body) await processStream(res.body.getReader());
-          } finally { setIsLoading(false); }
-        } catch (err) { console.error("Audio send:", err); setIsLoading(false); }
+          } finally { setIsLoading(false); onAiThinking?.(false); }
+        } catch (err) { console.error("Audio send:", err); setIsLoading(false); onAiThinking?.(false); }
       };
       mediaRecorderRef.current = recorder;
       recorder.start(300);
@@ -341,7 +406,16 @@ export default function AiChat({
   const statusText  = isRecording ? "OUVINDO" : isSpeaking ? "FALANDO" : isLoading ? "..." : "ONLINE";
   const statusColor = isRecording ? inputColor : isSpeaking ? outputColor : T.greenDim;
 
-  const panelStyle: CSSProperties = {
+  const MOBILE_PANEL_H = Math.round(Math.min(window.innerHeight * 0.50, 380));
+
+  const panelStyle: CSSProperties = isMobile ? {
+    position: "fixed", left: 0, bottom: 0, right: 0,
+    width: "100%", height: MOBILE_PANEL_H,
+    zIndex: 20,
+    pointerEvents: "auto", fontFamily: MONO,
+    display: "flex", flexDirection: "column", gap: 0,
+    userSelect: "none", overflow: "visible",
+  } : {
     position: "fixed", left: currentPos.x, top: currentPos.y,
     width: size.w, height: size.h, zIndex: 20,
     pointerEvents: "auto", fontFamily: MONO,
@@ -381,8 +455,85 @@ export default function AiChat({
   ];
 
   if (isMinimized) {
+    const iconBorder = isSpeaking
+      ? `1.5px solid ${outputColor}`
+      : "1.5px solid rgba(0,255,100,0.28)";
+    const iconShadow = isSpeaking
+      ? `0 0 18px ${outputColor}72`
+      : "0 4px 18px rgba(0,0,0,0.55), 0 0 10px rgba(0,255,100,0.06)";
+
+    if (isMobile) {
+      return (
+        <div style={{
+          position: "fixed", bottom: 18, left: "50%",
+          transform: "translateX(-50%)",
+          zIndex: 20, display: "flex", alignItems: "center", gap: 10,
+          userSelect: "none",
+        }}>
+          <div
+            title="Toque para abrir o chat"
+            onClick={() => setIsMinimized(false)}
+            style={{
+              width: 52, height: 52,
+              background: "rgba(3,7,14,0.95)",
+              border: iconBorder,
+              borderRadius: "50%", cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              boxShadow: iconShadow,
+              transition: "border-color 0.35s, box-shadow 0.35s",
+              animation: isSpeaking ? "termPulse 1.1s ease-in-out infinite" : "micIdle 3.5s ease-in-out infinite",
+              flexShrink: 0, overflow: "visible", position: "relative",
+            }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24"
+              fill="none"
+              stroke={isSpeaking ? outputColor : "rgba(140,165,200,0.7)"}
+              strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+              style={{ pointerEvents: "none" }}
+            >
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+            </svg>
+            {isSpeaking && (
+              <span style={{
+                position: "absolute", top: -3, right: -3,
+                width: 10, height: 10, borderRadius: "50%",
+                background: outputColor, boxShadow: `0 0 6px ${outputColor}`,
+                animation: "termPulse 0.9s ease-in-out infinite",
+                pointerEvents: "none",
+              }} />
+            )}
+          </div>
+          <div
+            title={isRecording ? "Parar gravação" : "Gravar voz"}
+            onClick={(e) => { e.stopPropagation(); toggleRecording(); }}
+            style={{
+              width: 26, height: 26, borderRadius: "50%", cursor: "pointer",
+              background: isRecording ? "#ff3b30" : "rgba(255,59,48,0.18)",
+              border: `1.5px solid ${isRecording ? "#ff3b30" : "rgba(255,59,48,0.45)"}`,
+              display: "flex", flexDirection: "column",
+              alignItems: "center", justifyContent: "center", gap: 1,
+              boxShadow: isRecording ? "0 0 12px #ff3b3088" : "none",
+              animation: isRecording ? "recPulse 0.9s ease-in-out infinite" : "none",
+              flexShrink: 0,
+            }}
+          >
+            <span style={{
+              fontSize: 6, fontWeight: 700, letterSpacing: "0.04em",
+              color: isRecording ? "#fff" : "rgba(255,59,48,0.85)",
+              fontFamily: MONO, pointerEvents: "none", lineHeight: 1,
+            }}>REC</span>
+          </div>
+          <style>{`
+            @keyframes termPulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.3;transform:scale(0.65)} }
+            @keyframes micIdle { 0%,100%{box-shadow:0 4px 18px rgba(0,0,0,0.55),0 0 10px rgba(0,255,100,0.06)} 50%{box-shadow:0 4px 18px rgba(0,0,0,0.55),0 0 18px rgba(0,255,100,0.18)} }
+            @keyframes recPulse { 0%,100%{box-shadow:0 0 12px #ff3b3088,0 0 4px #ff3b3055} 50%{box-shadow:0 0 20px #ff3b30bb,0 0 8px #ff3b3088} }
+          `}</style>
+        </div>
+      );
+    }
+
     const fallback = pos ?? { x: window.innerWidth - size.w - 18, y: window.innerHeight - size.h - 82 };
-    const ip = iconPos ?? { x: fallback.x, y: fallback.y + size.h - 44 };
+    const ip = iconPos ?? { x: fallback.x + size.w / 2 - 24, y: fallback.y + size.h - 58 };
 
     const onIconDragStart = (e: React.MouseEvent | React.TouchEvent) => {
       e.preventDefault();
@@ -396,17 +547,18 @@ export default function AiChat({
         if (!iconDragState.current) return;
         iconDragState.current.dragged = true;
         setIconPos({
-          x: Math.max(0, Math.min(window.innerWidth  - 44, mx - iconDragState.current.ox)),
-          y: Math.max(0, Math.min(window.innerHeight - 44, my - iconDragState.current.oy)),
+          x: Math.max(0, Math.min(window.innerWidth  - 80, mx - iconDragState.current.ox)),
+          y: Math.max(0, Math.min(window.innerHeight - 48, my - iconDragState.current.oy)),
         });
       };
       const onUp = () => {
-        if (iconDragState.current && !iconDragState.current.dragged) setIsMinimized(false);
+        const wasDragged = iconDragState.current?.dragged;
         iconDragState.current = null;
         window.removeEventListener("mousemove", onMove);
         window.removeEventListener("mouseup", onUp);
         window.removeEventListener("touchmove", onMove);
         window.removeEventListener("touchend", onUp);
+        if (!wasDragged) setIsMinimized(false);
       };
       window.addEventListener("mousemove", onMove);
       window.addEventListener("mouseup", onUp);
@@ -415,40 +567,94 @@ export default function AiChat({
     };
 
     return (
-      <div
-        title="Arrastar / clique para abrir"
-        onMouseDown={onIconDragStart}
-        onTouchStart={onIconDragStart}
-        style={{
-          position: "fixed", left: ip.x, top: ip.y,
-          width: 44, height: 44, zIndex: 20,
-          background: T.bg,
-          border: isSpeaking ? `1px solid ${outputColor}` : `1px solid ${T.faint}`,
-          borderRadius: "50%", cursor: "grab",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          boxShadow: isSpeaking ? `0 0 18px ${outputColor}72` : `0 4px 18px rgba(0,0,0,0.55)`,
-          transition: "border-color 0.3s, box-shadow 0.3s",
-          fontFamily: MONO, userSelect: "none",
-        }}
-      >
-        <span style={{
-          fontSize: 20, userSelect: "none", pointerEvents: "none",
-          animation: isSpeaking ? "termPulse 1.1s ease-in-out infinite" : "none",
-          color: isSpeaking ? outputColor : T.greenDim,
-        }}>⬡</span>
-        {isSpeaking && (
+      <div style={{
+        position: "fixed", left: ip.x, top: ip.y,
+        zIndex: 20, display: "flex", alignItems: "center", gap: 8,
+        userSelect: "none",
+      }}>
+        {/* ── Main icon: click = open chat, drag = move ───────────────────── */}
+        <div
+          title="Clique para abrir o chat · arrastar para mover"
+          onMouseDown={onIconDragStart}
+          onTouchStart={onIconDragStart}
+          style={{
+            width: 48, height: 48,
+            background: "rgba(3,7,14,0.95)",
+            border: iconBorder,
+            borderRadius: "50%", cursor: "grab",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            boxShadow: iconShadow,
+            transition: "border-color 0.35s, box-shadow 0.35s",
+            animation: isSpeaking ? "termPulse 1.1s ease-in-out infinite" : "micIdle 3.5s ease-in-out infinite",
+            flexShrink: 0, overflow: "visible", position: "relative",
+          }}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24"
+            fill="none"
+            stroke={isSpeaking ? outputColor : "rgba(140,165,200,0.7)"}
+            strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+            style={{ pointerEvents: "none" }}
+          >
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+          {isSpeaking && (
+            <span style={{
+              position:"absolute", top:-3, right:-3,
+              width:9, height:9, borderRadius:"50%",
+              background: outputColor, boxShadow:`0 0 6px ${outputColor}`,
+              animation:"termPulse 0.9s ease-in-out infinite",
+              pointerEvents:"none",
+            }} />
+          )}
+        </div>
+
+        {/* ── REC button: click = toggle recording ────────────────────────── */}
+        <div
+          title={isRecording ? "Parar gravação" : "Gravar voz"}
+          onClick={(e) => { e.stopPropagation(); toggleRecording(); }}
+          onMouseDown={(e) => e.stopPropagation()}
+          style={{
+            width: 22, height: 22,
+            borderRadius: "50%", cursor: "pointer",
+            background: isRecording ? "#ff3b30" : "rgba(3,7,14,0.95)",
+            border: `1.5px solid ${isRecording ? "#ff3b30" : "rgba(255,59,48,0.60)"}`,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            boxShadow: isRecording
+              ? "0 0 12px #ff3b3088, 0 0 4px #ff3b3055"
+              : "0 2px 8px rgba(0,0,0,0.5)",
+            animation: isRecording ? "recPulse 0.9s ease-in-out infinite" : "none",
+            transition: "background 0.2s, border-color 0.2s, box-shadow 0.2s",
+            flexShrink: 0, position: "relative",
+          }}
+        >
+          {/* Sonar rings when recording */}
+          {isRecording && <>
+            <div style={{ position:"absolute", width:22, height:22, borderRadius:"50%", border:"1px solid #ff3b30", pointerEvents:"none", animation:"micRing 1.4s ease-out infinite" }} />
+            <div style={{ position:"absolute", width:22, height:22, borderRadius:"50%", border:"1px solid #ff3b30", pointerEvents:"none", animation:"micRing 1.4s ease-out 0.5s infinite" }} />
+          </>}
           <span style={{
-            position: "absolute", top: -3, right: -3,
-            width: 9, height: 9, borderRadius: "50%",
-            background: outputColor, boxShadow: `0 0 6px ${outputColor}`,
-            animation: "termPulse 0.9s ease-in-out infinite",
-            pointerEvents: "none",
-          }} />
-        )}
+            fontSize: 6, fontWeight: 700, letterSpacing: "0.04em",
+            color: isRecording ? "#fff" : "rgba(255,59,48,0.85)",
+            fontFamily: MONO, pointerEvents: "none", lineHeight: 1,
+          }}>REC</span>
+        </div>
+
         <style>{`
           @keyframes termPulse {
             0%,100% { opacity:1; transform:scale(1); }
             50% { opacity:0.3; transform:scale(0.65); }
+          }
+          @keyframes micIdle {
+            0%,100% { box-shadow: 0 4px 18px rgba(0,0,0,0.55), 0 0 10px rgba(0,255,100,0.06); }
+            50% { box-shadow: 0 4px 18px rgba(0,0,0,0.55), 0 0 18px rgba(0,255,100,0.18); }
+          }
+          @keyframes recPulse {
+            0%,100% { box-shadow: 0 0 12px #ff3b3088, 0 0 4px #ff3b3055; }
+            50% { box-shadow: 0 0 20px #ff3b30bb, 0 0 8px #ff3b3088; }
+          }
+          @keyframes micRing {
+            0%   { transform: scale(0.85); opacity: 0.7; }
+            100% { transform: scale(2.8);  opacity: 0; }
           }
         `}</style>
       </div>
@@ -651,15 +857,96 @@ export default function AiChat({
           </div>
         </div>
 
-        {/* ── Input row ──────────────────────────────────────────────────────── */}
+        {/* ── Input area ─────────────────────────────────────────────────────── */}
         <div style={{
-          display: "flex", alignItems: "center", justifyContent: "center",
-          padding: "16px 8px",
+          display: "flex", flexDirection: "column",
           borderTop: `1px solid ${T.faint}`,
           background: "rgba(0,255,100,0.015)",
           flexShrink: 0,
-          position: "relative",
         }}>
+
+          {/* Attached file chip */}
+          {attachedFile && (
+            <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 10px 2px", flexWrap: "nowrap" }}>
+              {attachedFile.kind === "image" && attachedFile.previewUrl ? (
+                <img src={attachedFile.previewUrl} alt="" style={{ width: 24, height: 24, objectFit: "cover", borderRadius: 3, border: `1px solid ${T.faint}`, flexShrink: 0 }} />
+              ) : (
+                <span style={{ fontSize: 11, flexShrink: 0 }}>{attachedFile.kind === "pdf" ? "📄" : "📝"}</span>
+              )}
+              <span style={{ fontSize: 8, color: T.dim, letterSpacing: "0.04em", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {attachedFile.name}
+              </span>
+              <button onClick={() => setAttachedFile(null)} onMouseDown={e => e.stopPropagation()}
+                style={{ background: "none", border: "none", cursor: "pointer", color: T.dim, fontSize: 12, padding: "0 2px", lineHeight: 1, flexShrink: 0 }}>×</button>
+            </div>
+          )}
+
+          {/* Text input row */}
+          <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "6px 8px 4px" }}>
+            {/* Attach button */}
+            <button
+              title="Anexar arquivo"
+              onClick={() => fileInputRef.current?.click()}
+              onMouseDown={e => e.stopPropagation()}
+              style={{
+                background: attachedFile ? `${inputColor}20` : "none",
+                border: `1px solid ${attachedFile ? inputColor : T.faint}`,
+                borderRadius: 4, cursor: "pointer", flexShrink: 0,
+                padding: "5px 6px", color: attachedFile ? inputColor : T.dim,
+                lineHeight: 0, transition: "all 0.2s",
+              }}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+              </svg>
+            </button>
+            <input type="file" ref={fileInputRef} style={{ display: "none" }}
+              accept="image/*,.pdf,.txt,.md,.csv,.json,.xml,.html,.js,.ts,.py,.java,.c,.cpp"
+              onChange={handleFileSelect}
+            />
+            {/* Text input */}
+            <input
+              type="text"
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendText(); } }}
+              onMouseDown={e => e.stopPropagation()}
+              placeholder="mensagem..."
+              disabled={isLoading && !isRecording}
+              style={{
+                ...inputStyle,
+                flex: 1,
+                background: "rgba(0,255,100,0.04)",
+                border: `1px solid ${T.faint}`,
+                borderRadius: 4,
+                padding: "5px 8px",
+              }}
+            />
+            {/* Send button */}
+            <button
+              onClick={sendText}
+              disabled={(!input.trim() && !attachedFile) || isLoading}
+              onMouseDown={e => e.stopPropagation()}
+              title="Enviar"
+              style={{
+                background: (input.trim() || attachedFile) && !isLoading ? `${inputColor}20` : "none",
+                border: `1px solid ${(input.trim() || attachedFile) && !isLoading ? inputColor : T.faint}`,
+                borderRadius: 4, flexShrink: 0, lineHeight: 0,
+                cursor: (input.trim() || attachedFile) && !isLoading ? "pointer" : "not-allowed",
+                padding: "5px 7px",
+                color: (input.trim() || attachedFile) && !isLoading ? inputColor : T.dim,
+                transition: "all 0.2s",
+                opacity: (!input.trim() && !attachedFile) || isLoading ? 0.4 : 1,
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+              </svg>
+            </button>
+          </div>
+
+          {/* Mic row */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "6px 8px 14px", position: "relative" }}>
           {/* Sonar rings when recording */}
           {isRecording && <>
             <div style={{ position: "absolute", width: 60, height: 60, borderRadius: "50%", border: `1px solid ${inputColor}`, pointerEvents: "none", animation: "micRing 1.5s ease-out infinite" }} />
@@ -724,6 +1011,7 @@ export default function AiChat({
           }}>
             {isRecording ? "OUVINDO" : isLoading ? "PROCESSANDO" : "TOQUE PARA FALAR"}
           </span>
+          </div>
         </div>
 
       </div>
