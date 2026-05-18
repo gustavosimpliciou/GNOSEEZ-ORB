@@ -34,18 +34,18 @@ const N             = 420;
 const RADIUS        = 235;
 const CONNECT_DIST  = 96;
 const MAX_CONN      = 6;
-const SPRING_K      = 0.020;
-const DAMPING       = 0.945;
-const MAX_DISP      = RADIUS * 0.07;
-const AUTO_ROT_Y    = 0.00052;
-const AUTO_ROT_X    = 0.00013;
+const SPRING_K      = 0.014;
+const DAMPING       = 0.968;
+const MAX_DISP      = RADIUS * 0.038;
+const AUTO_ROT_Y    = 0.00038;
+const AUTO_ROT_X    = 0.00008;
 const MOUSE_R       = 180;
 const MOUSE_F       = 4.0;
-const AUDIO_F_LOW   = 0.08;
-const AUDIO_F_HIGH  = 1.5;
-const THRESHOLD     = 0.28;   // trigger at medium-to-loud voice level
-const NOISE_AMT     = 2.5;
-const NOISE_SPD     = 0.00045;
+const AUDIO_F_LOW   = 0.03;
+const AUDIO_F_HIGH  = 1.1;
+const THRESHOLD     = 0.42;   // only react to medium-to-loud voice
+const NOISE_AMT     = 0.9;
+const NOISE_SPD     = 0.00030;
 const WAVE_DOTS     = 32;
 const MIN_ZOOM      = 0.48;
 const MAX_ZOOM      = 1.38;
@@ -191,6 +191,7 @@ export default function NeuralOrb() {
   const darkRef = useRef(false);
   const [uiTick, setUiTick] = useState(0);
   const aiAnalyserRef  = useRef<{ node: AnalyserNode; data: Uint8Array } | null>(null) as MutableRefObject<{ node: AnalyserNode; data: Uint8Array } | null>;
+  const chatRecordingAnalyserRef = useRef<{ node: AnalyserNode; data: Uint8Array } | null>(null) as MutableRefObject<{ node: AnalyserNode; data: Uint8Array } | null>;
   const aiRecordingRef = useRef(false) as MutableRefObject<boolean>;
   const [aiSpeaking, setAiSpeaking] = useState(false);
   void aiSpeaking;
@@ -431,6 +432,28 @@ export default function NeuralOrb() {
         totalLvl = Math.max(totalLvl, isFinite(aiLvl) ? clamp(aiLvl, 0, 1) : 0);
       }
 
+      // ── Chat recording audio merge (orb reacts while user speaks) ─────────
+      const chatRecAn = chatRecordingAnalyserRef.current;
+      if (chatRecAn) {
+        chatRecAn.node.getByteFrequencyData(chatRecAn.data);
+        const len3  = chatRecAn.data.length;
+        const cuts3 = [0, 0.06, 0.15, 0.35, 1.0];
+        for (let b = 0; b < 4; b++) {
+          const lo = Math.floor(cuts3[b] * len3);
+          const hi = Math.floor(cuts3[b + 1] * len3);
+          let sum  = 0;
+          for (let i = lo; i < hi; i++) sum += chatRecAn.data[i];
+          const recB = Math.pow((sum / ((hi - lo) * 255)) * 2.2, 0.65);
+          rawBands[b] = Math.max(rawBands[b], recB);
+        }
+        const vLo3 = Math.floor(len3 * 0.04);
+        const vHi3 = Math.floor(len3 * 0.45);
+        let vSum3  = 0;
+        for (let i = vLo3; i < vHi3; i++) vSum3 += chatRecAn.data[i];
+        const recLvl = Math.pow(clamp((vSum3 / ((vHi3 - vLo3) * 255)) * 3.2, 0, 10), 0.70);
+        totalLvl = Math.max(totalLvl, isFinite(recLvl) ? clamp(recLvl, 0, 1) : 0);
+      }
+
       const targetAudio = clamp(totalLvl, 0, 1);
       // Very fast attack to stay in sync with voice peaks, slow decay for graceful return
       const audioAttack  = targetAudio > s.smoothAudio ? 0.60 : 0.020;
@@ -445,7 +468,7 @@ export default function NeuralOrb() {
       // ── threshold gate ───────────────────────────────────────────────────
       // When mic is active (OUVINDO...) react to any sound above noise floor.
       // When idle, keep high threshold so the orb doesn't react to nothing.
-      const listening = !!s.analyser;
+      const listening = !!s.analyser || aiRecordingRef.current || !!chatRecordingAnalyserRef.current;
       const activeThreshold = listening ? 0.28 : THRESHOLD;
       const aboveThreshold = sl > activeThreshold;
       // Smooth fade zone around threshold — eliminates hard on/off jump.
@@ -463,20 +486,20 @@ export default function NeuralOrb() {
       const ambientInterval = aboveThreshold
         ? 55 / (1 + sl * 3.0)                        // fast when loud
         : listening
-          ? 120 / (1 + sl * 2.0)                     // moderate when listening but quiet
-          : 280;                                      // very slow when idle
+          ? 400 / (1 + sl * 1.0)                     // very slow when listening but quiet
+          : 600;                                      // barely moves when idle
       if (t - s.lastWaveTime > ambientInterval) {
         s.lastWaveTime = t;
         s.waves.push({
           radius:    0,
-          speed:     aboveThreshold ? (3.2 + sl * 1.8) : listening ? 1.8 + sl : 1.6,
-          energy:    aboveThreshold ? clamp(0.22 + sl * 0.38, 0.22, 0.90) : listening ? clamp(0.10 + sl * 0.30, 0.10, 0.65) : 0.05,
-          thickness: RADIUS * (aboveThreshold ? 0.17 : 0.22),
+          speed:     aboveThreshold ? (3.2 + sl * 1.8) : listening ? 1.2 + sl * 0.5 : 1.0,
+          energy:    aboveThreshold ? clamp(0.22 + sl * 0.38, 0.22, 0.90) : listening ? clamp(0.04 + sl * 0.12, 0.04, 0.30) : 0.02,
+          thickness: RADIUS * (aboveThreshold ? 0.17 : 0.28),
         });
       }
       // Extra reactive bursts on loud sound peaks — fire eagerly to stay in sync
-      const burstThreshold = listening ? 0.20 : 0.44;
-      if (aboveThreshold && sl > burstThreshold && Math.random() < (sl - (listening ? 0.10 : 0.30)) * 0.22 * dt) {
+      const burstThreshold = listening ? 0.38 : 0.55;
+      if (aboveThreshold && sl > burstThreshold && Math.random() < (sl - (listening ? 0.28 : 0.45)) * 0.18 * dt) {
         s.waves.push({
           radius:    0,
           speed:     5.0 + sl * 2.5,
@@ -485,8 +508,8 @@ export default function NeuralOrb() {
         });
       }
 
-      // breath — very subtle idle, more alive with sound
-      s.breathPhase += (0.0032 + effectiveAudio * 0.012) * dt;
+      // breath — almost imperceptible in silence, more alive with sound
+      s.breathPhase += (0.0018 + effectiveAudio * 0.008) * dt;
       const breath = Math.sin(s.breathPhase) * 0.5 + 0.5;
 
       s.rotY += AUTO_ROT_Y * dt;
@@ -560,18 +583,20 @@ export default function NeuralOrb() {
         p.wy += p.vy * dt;
         p.wz += p.vz * dt;
 
-        // Impulses scale smoothly with audio — no jump from quiet to chaotic
-        const impulseChance = 0.0012 + smoothFade * (0.004 + sl * 0.018 - 0.0012);
-        if (Math.random() < impulseChance * dt) {
+        // Impulses — only fire when clearly above threshold
+        const impulseChance = smoothFade > 0.15
+          ? 0.0004 + smoothFade * (0.003 + sl * 0.012 - 0.0004)
+          : 0;
+        if (impulseChance > 0 && Math.random() < impulseChance * dt) {
           const theta = Math.random() * Math.PI * 2;
           const phi   = Math.acos(2 * Math.random() - 1);
-          const str   = (0.4 + Math.random() * 0.8) + smoothFade * (1.0 + Math.random() * 3.0) * (0.5 + sl);
+          const str   = (0.2 + Math.random() * 0.5) + smoothFade * (0.8 + Math.random() * 2.0) * (0.4 + sl);
           p.vx += Math.sin(phi) * Math.cos(theta) * str;
           p.vy += Math.sin(phi) * Math.sin(theta) * str;
           p.vz += Math.cos(phi) * str;
         }
-        // Occasional burst spike — scales with smoothFade, no hard gate
-        if (smoothFade > 0.3 && sl > 0.25 && Math.random() < 0.0006 * dt * sl * smoothFade) {
+        // Occasional burst spike — only on loud clear sound
+        if (smoothFade > 0.5 && sl > 0.40 && Math.random() < 0.0004 * dt * sl * smoothFade) {
           const theta = Math.random() * Math.PI * 2;
           const phi   = Math.acos(2 * Math.random() - 1);
           const str   = 4.0 + Math.random() * 5.0;
@@ -653,13 +678,13 @@ export default function NeuralOrb() {
       ctx2d.fillStyle = isDark ? '#080c12' : '#ffffff';
       ctx2d.fillRect(0, 0, W, H);
 
-      // Dynamic color: green = listening (AiChat recording), blue = AI speaking, accent = idle
-      const _aiRec = aiRecordingRef.current;
+      // Dynamic color: green = listening (AiChat recording), cyan = AI speaking, accent = idle
+      const _aiRec = aiRecordingRef.current || !!chatRecordingAnalyserRef.current;
       const _aiSpk = !!aiAnalyserRef.current;
       const { r: cr, g: cg, b: cb } = _aiRec
-        ? { r: 28, g: 210, b: 80 }
+        ? { r: 0, g: 240, b: 100 }
         : _aiSpk
-        ? { r: 50, g: 110, b: 255 }
+        ? { r: 20, g: 200, b: 255 }
         : s.rgb;
 
       // ── advance waves ───────────────────────────────────────────────────
@@ -1145,35 +1170,6 @@ export default function NeuralOrb() {
         )}
       </div>
 
-      {/* ── MIC BUTTON ───────────────────────────────────────────────────── */}
-      {!micActive && !micDenied && (
-        <button onClick={startMic} style={{
-          position:"absolute",
-          bottom: isMobile ? 32 : 86,
-          left:"50%",
-          transform:"translateX(-50%)",
-          zIndex:20,
-          background:"transparent",
-          border:`1px solid ${accent}`,
-          color:accent,
-          fontSize: isMobile ? 9 : 8.5,
-          fontFamily:"inherit",
-          letterSpacing:"0.22em",
-          padding: isMobile ? "11px 28px" : "10px 26px",
-          cursor:"pointer",
-          transition:"all 0.3s ease",
-          textTransform:"uppercase",
-          whiteSpace:"nowrap",
-        }}
-          onMouseEnter={e=>{ e.currentTarget.style.background=`rgba(${cr},${cg},${cb},0.06)`; }}
-          onMouseLeave={e=>{ e.currentTarget.style.background="transparent"; }}
-        >{tr.ativarMic}</button>
-      )}
-      {micDenied && (
-        <div style={{ position:"absolute", bottom: isMobile ? 32 : 86, left:"50%", transform:"translateX(-50%)", zIndex:20, fontSize:8.5, letterSpacing:"0.12em", color: fg38, textTransform:"uppercase", whiteSpace:"nowrap" }}>
-          {tr.acessoNegado}
-        </div>
-      )}
 
       {/* ── AI CHAT PANEL ─────────────────────────────────────────────────── */}
       <AiChat
@@ -1181,6 +1177,7 @@ export default function NeuralOrb() {
         accent={[S.current.rgb.r, S.current.rgb.g, S.current.rgb.b]}
         isMobile={isMobile}
         aiAnalyserRef={aiAnalyserRef}
+        chatRecordingAnalyserRef={chatRecordingAnalyserRef}
         onAiSpeaking={setAiSpeaking}
         recordingRef={aiRecordingRef}
       />

@@ -2,7 +2,7 @@ import { Router } from "express";
 import { db, conversations, messages, voicesTable } from "@workspace/db";
 import { eq, asc } from "drizzle-orm";
 import { openai } from "@workspace/integrations-openai-ai-server";
-import { speechToText } from "@workspace/integrations-openai-ai-server/audio";
+import { speechToText, ensureCompatibleFormat } from "@workspace/integrations-openai-ai-server/audio";
 
 const router = Router();
 
@@ -145,9 +145,9 @@ router.post("/conversations/:id/voice-messages", async (req, res) => {
   const send = (data: object) => res.write(`data: ${JSON.stringify(data)}\n\n`);
 
   try {
-    const audioBuffer = Buffer.from(audioBase64, "base64");
-    const transcription = await speechToText(audioBuffer, "webm");
-    const userText = transcription.text ?? "";
+    const rawBuffer = Buffer.from(audioBase64, "base64");
+    const { buffer: audioBuffer, format } = await ensureCompatibleFormat(rawBuffer);
+    const userText = await speechToText(audioBuffer, format);
 
     send({ type: "user_transcript", content: userText });
     await db.insert(messages).values({ conversationId: id, role: "user", content: userText });
