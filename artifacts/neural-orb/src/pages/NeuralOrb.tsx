@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, type MutableRefObject } from "react";
+import AiChat from "../components/AiChat";
 
 // ─── TYPES ───────────────────────────────────────────────────────────────────
 interface Particle {
@@ -33,8 +34,8 @@ const N             = 420;
 const RADIUS        = 235;
 const CONNECT_DIST  = 96;
 const MAX_CONN      = 6;
-const SPRING_K      = 0.038;
-const DAMPING       = 0.905;
+const SPRING_K      = 0.020;
+const DAMPING       = 0.945;
 const MAX_DISP      = RADIUS * 0.07;
 const AUTO_ROT_Y    = 0.00052;
 const AUTO_ROT_X    = 0.00013;
@@ -42,7 +43,7 @@ const MOUSE_R       = 180;
 const MOUSE_F       = 4.0;
 const AUDIO_F_LOW   = 0.08;
 const AUDIO_F_HIGH  = 1.5;
-const THRESHOLD     = 0.42;   // only real speech crosses this bar
+const THRESHOLD     = 0.28;   // trigger at medium-to-loud voice level
 const NOISE_AMT     = 2.5;
 const NOISE_SPD     = 0.00045;
 const WAVE_DOTS     = 32;
@@ -185,9 +186,14 @@ export default function NeuralOrb() {
   const [breathKey,   setBreathKey]   = useState<'suave'|'inalando'|'exalando'>('suave');
   const [darkMode,    setDarkMode]    = useState(false);
   const [lang,        setLang]        = useState<Lang>('pt');
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [isMobile,    setIsMobile]    = useState(() => window.innerWidth < 680);
   const darkRef = useRef(false);
   const [uiTick, setUiTick] = useState(0);
+  const aiAnalyserRef  = useRef<{ node: AnalyserNode; data: Uint8Array } | null>(null) as MutableRefObject<{ node: AnalyserNode; data: Uint8Array } | null>;
+  const aiRecordingRef = useRef(false) as MutableRefObject<boolean>;
+  const [aiSpeaking, setAiSpeaking] = useState(false);
+  void aiSpeaking;
 
   // ── init particles ─────────────────────────────────────────────────────────
   const initParticles = useCallback((cx: number, cy: number) => {
@@ -224,7 +230,7 @@ export default function NeuralOrb() {
       const src      = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 256;
-      analyser.smoothingTimeConstant = 0.75;
+      analyser.smoothingTimeConstant = 0.28;
       src.connect(analyser);
       S.current.analyser  = analyser;
       S.current.dataArray = new Uint8Array(analyser.frequencyBinCount);
@@ -236,6 +242,20 @@ export default function NeuralOrb() {
     setAccentColor(hex);
     S.current.accentColor = hex;
     S.current.rgb = hexToRgb(hex);
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    } else {
+      document.exitFullscreen().catch(() => {});
+    }
+  }, []);
+
+  useEffect(() => {
+    const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", onFsChange);
+    return () => document.removeEventListener("fullscreenchange", onFsChange);
   }, []);
 
   // ── main loop ─────────────────────────────────────────────────────────────
@@ -359,7 +379,7 @@ export default function NeuralOrb() {
         for (let i = voiceLo; i < voiceHi; i++) sum += s.dataArray[i];
         const binRange = (voiceHi - voiceLo) * 255;
         const rawLvlRaw = binRange > 0
-          ? Math.pow(clamp((sum / binRange) * 1.4, 0, 10), 0.75)
+          ? Math.pow(clamp((sum / binRange) * 3.2, 0, 10), 0.70)
           : 0;
         const rawLvl = isFinite(rawLvlRaw) ? clamp(rawLvlRaw, 0, 1) : 0;
 
@@ -367,7 +387,7 @@ export default function NeuralOrb() {
         // The floor slowly rises to match ambient silence, then subtracts
         // itself out so only sounds *above* the mic's own noise register.
         if (!isFinite(s.noiseFloor) || s.noiseFloor < 0) s.noiseFloor = 0;
-        const overFloor = rawLvl > s.noiseFloor + 0.22;  // must be clearly above noise
+        const overFloor = rawLvl > s.noiseFloor + 0.12;  // must be clearly above noise
         if (overFloor) {
           // Sound detected — floor decays very slowly (don't count speech as noise)
           s.noiseFloor = lerp(s.noiseFloor, s.noiseFloor * 0.995, 0.05 * dt);
@@ -376,8 +396,8 @@ export default function NeuralOrb() {
           s.noiseFloor = lerp(s.noiseFloor, rawLvl, 0.055 * dt);
         }
         if (!isFinite(s.noiseFloor)) s.noiseFloor = 0;
-        // Subtract floor with aggressive 2.2× headroom margin
-        const floor    = clamp(s.noiseFloor * 2.20, 0, 0.95);
+        // Subtract floor with moderate 1.75× headroom margin
+        const floor    = clamp(s.noiseFloor * 1.75, 0, 0.92);
         const cleaned  = clamp(rawLvl - floor, 0, 1);
         const ceiling  = clamp(1 - floor, 0.05, 1);
         const lvlRaw   = cleaned / ceiling;
@@ -389,47 +409,78 @@ export default function NeuralOrb() {
         }
       }
 
+      // ── AI audio merge ────────────────────────────────────────────────────
+      const aiAn = aiAnalyserRef.current;
+      if (aiAn) {
+        aiAn.node.getByteFrequencyData(aiAn.data);
+        const len2  = aiAn.data.length;
+        const cuts2 = [0, 0.06, 0.15, 0.35, 1.0];
+        for (let b = 0; b < 4; b++) {
+          const lo = Math.floor(cuts2[b] * len2);
+          const hi = Math.floor(cuts2[b + 1] * len2);
+          let sum  = 0;
+          for (let i = lo; i < hi; i++) sum += aiAn.data[i];
+          const aiB = Math.pow((sum / ((hi - lo) * 255)) * 2.2, 0.65);
+          rawBands[b] = Math.max(rawBands[b], aiB);
+        }
+        const vLo = Math.floor(len2 * 0.04);
+        const vHi = Math.floor(len2 * 0.45);
+        let vSum = 0;
+        for (let i = vLo; i < vHi; i++) vSum += aiAn.data[i];
+        const aiLvl = Math.pow(clamp((vSum / ((vHi - vLo) * 255)) * 3.2, 0, 10), 0.70);
+        totalLvl = Math.max(totalLvl, isFinite(aiLvl) ? clamp(aiLvl, 0, 1) : 0);
+      }
+
       const targetAudio = clamp(totalLvl, 0, 1);
-      // Moderate attack — requires sustained sound, not just a quick tap
-      const audioAttack  = targetAudio > s.smoothAudio ? 0.38 : 0.06;
+      // Very fast attack to stay in sync with voice peaks, slow decay for graceful return
+      const audioAttack  = targetAudio > s.smoothAudio ? 0.60 : 0.020;
       s.smoothAudio = clamp(lerp(s.smoothAudio, targetAudio, audioAttack * dt), 0, 1);
       for (let b = 0; b < 4; b++) {
         const raw = clamp(rawBands[b], 0, 1);
-        const bandAttack = raw > s.bands[b] ? 0.55 : 0.08;
+        const bandAttack = raw > s.bands[b] ? 0.65 : 0.030;
         s.bands[b] = clamp(lerp(s.bands[b], raw, bandAttack * dt), 0, 1);
       }
       const sl = isFinite(s.smoothAudio) ? s.smoothAudio : 0;
 
-      // ── threshold gate — only react to medium-high sound ────────────────
-      const aboveThreshold = sl > THRESHOLD;
-      // Below threshold: nearly dead. Above: full, smooth reactivity.
-      const effectiveAudioRaw = aboveThreshold
-        ? sl
-        : sl * (sl / THRESHOLD) * 0.08;
+      // ── threshold gate ───────────────────────────────────────────────────
+      // When mic is active (OUVINDO...) react to any sound above noise floor.
+      // When idle, keep high threshold so the orb doesn't react to nothing.
+      const listening = !!s.analyser;
+      const activeThreshold = listening ? 0.28 : THRESHOLD;
+      const aboveThreshold = sl > activeThreshold;
+      // Smooth fade zone around threshold — eliminates hard on/off jump.
+      // Instead of a cliff, audio fades in/out over a gradual window.
+      const fadeWindow = 0.12;
+      const fadeRaw    = clamp((sl - (activeThreshold - fadeWindow)) / (fadeWindow * 2), 0, 1);
+      const smoothFade = fadeRaw * fadeRaw * (3 - 2 * fadeRaw); // smoothstep
+      const effectiveAudioRaw = sl * smoothFade;
       const effectiveAudio = isFinite(effectiveAudioRaw) ? clamp(effectiveAudioRaw, 0, 1) : 0;
-      const audioForce = aboveThreshold ? AUDIO_F_HIGH : AUDIO_F_LOW;
+      const audioForce = AUDIO_F_LOW + smoothFade * (AUDIO_F_HIGH - AUDIO_F_LOW);
 
       // ── sphere waves ─────────────────────────────────────────────────────
-      // Quiet: one very slow, faint heartbeat every ~8 seconds
-      // Active: more frequent energetic waves
+      // Listening: waves driven by audio level, even for quiet sounds.
+      // Quiet/idle: very slow heartbeat every ~8 seconds.
       const ambientInterval = aboveThreshold
-        ? 55 / (1 + sl * 3.0)   // fast when loud
-        : 280;                   // very slow when quiet
+        ? 55 / (1 + sl * 3.0)                        // fast when loud
+        : listening
+          ? 120 / (1 + sl * 2.0)                     // moderate when listening but quiet
+          : 280;                                      // very slow when idle
       if (t - s.lastWaveTime > ambientInterval) {
         s.lastWaveTime = t;
         s.waves.push({
           radius:    0,
-          speed:     aboveThreshold ? (3.2 + sl * 1.8) : 1.6,
-          energy:    aboveThreshold ? clamp(0.22 + sl * 0.38, 0.22, 0.90) : 0.05,
+          speed:     aboveThreshold ? (3.2 + sl * 1.8) : listening ? 1.8 + sl : 1.6,
+          energy:    aboveThreshold ? clamp(0.22 + sl * 0.38, 0.22, 0.90) : listening ? clamp(0.10 + sl * 0.30, 0.10, 0.65) : 0.05,
           thickness: RADIUS * (aboveThreshold ? 0.17 : 0.22),
         });
       }
       // Extra reactive bursts on loud sound peaks — fire eagerly to stay in sync
-      if (aboveThreshold && sl > 0.44 && Math.random() < (sl - 0.30) * 0.22 * dt) {
+      const burstThreshold = listening ? 0.20 : 0.44;
+      if (aboveThreshold && sl > burstThreshold && Math.random() < (sl - (listening ? 0.10 : 0.30)) * 0.22 * dt) {
         s.waves.push({
           radius:    0,
           speed:     5.0 + sl * 2.5,
-          energy:    clamp(sl * 0.85, 0.4, 1.0),
+          energy:    clamp(sl * 0.85, listening ? 0.25 : 0.4, 1.0),
           thickness: RADIUS * 0.10,
         });
       }
@@ -470,8 +521,8 @@ export default function NeuralOrb() {
 
       // ── update particles ─────────────────────────────────────────────────
       const ps = s.particles;
-      // Noise is nearly silent below threshold — only adds very gentle organic drift
-      const noiseScale = aboveThreshold ? NOISE_AMT : NOISE_AMT * 0.10;
+      // Noise drifts smoothly with audio — no hard on/off switch
+      const noiseScale = NOISE_AMT * (0.10 + smoothFade * 0.90);
 
       for (let i = 0; i < ps.length; i++) {
         const p = ps[i];
@@ -491,13 +542,14 @@ export default function NeuralOrb() {
 
         const bandVal = s.bands[p.band];
         const rLen    = Math.sqrt(p.bx*p.bx + p.by*p.by + p.bz*p.bz) || 1;
-        const af      = (aboveThreshold ? bandVal : bandVal * 0.10) * audioForce * dt;
-        p.vx += (p.bx / rLen) * af;
-        p.vy += (p.by / rLen) * af;
-        p.vz += (p.bz / rLen) * af;
+        // Audio force pulls INWARD — orb compresses with sound instead of expanding
+        const af = bandVal * (0.10 + smoothFade * 0.90) * audioForce * dt;
+        p.vx -= (p.bx / rLen) * af;
+        p.vy -= (p.by / rLen) * af;
+        p.vz -= (p.bz / rLen) * af;
 
-        // Spring — softer, more fluid
-        const breathScale = 1 + breath * 0.022 + effectiveAudio * 0.022;
+        // Spring target shrinks with audio — reinforces the inward compression
+        const breathScale = 1 + breath * 0.022 - effectiveAudio * 0.028;
         p.vx += (p.bx * breathScale + nx - p.wx) * SPRING_K * dt;
         p.vy += (p.by * breathScale + ny - p.wy) * SPRING_K * dt;
         p.vz += (p.bz * breathScale + nz - p.wz) * SPRING_K * dt;
@@ -508,20 +560,18 @@ export default function NeuralOrb() {
         p.wy += p.vy * dt;
         p.wz += p.vz * dt;
 
-        // Irregular random impulses — always active, chaotic above threshold
-        const impulseChance = aboveThreshold ? 0.004 + sl * 0.018 : 0.0012;
+        // Impulses scale smoothly with audio — no jump from quiet to chaotic
+        const impulseChance = 0.0012 + smoothFade * (0.004 + sl * 0.018 - 0.0012);
         if (Math.random() < impulseChance * dt) {
           const theta = Math.random() * Math.PI * 2;
           const phi   = Math.acos(2 * Math.random() - 1);
-          const str   = aboveThreshold
-            ? (1.0 + Math.random() * 3.0) * (0.5 + sl)
-            : 0.4 + Math.random() * 0.8;
+          const str   = (0.4 + Math.random() * 0.8) + smoothFade * (1.0 + Math.random() * 3.0) * (0.5 + sl);
           p.vx += Math.sin(phi) * Math.cos(theta) * str;
           p.vy += Math.sin(phi) * Math.sin(theta) * str;
           p.vz += Math.cos(phi) * str;
         }
-        // Occasional burst spike — creates sudden irregular group pops
-        if (aboveThreshold && sl > 0.25 && Math.random() < 0.0006 * dt * sl) {
+        // Occasional burst spike — scales with smoothFade, no hard gate
+        if (smoothFade > 0.3 && sl > 0.25 && Math.random() < 0.0006 * dt * sl * smoothFade) {
           const theta = Math.random() * Math.PI * 2;
           const phi   = Math.acos(2 * Math.random() - 1);
           const str   = 4.0 + Math.random() * 5.0;
@@ -603,7 +653,14 @@ export default function NeuralOrb() {
       ctx2d.fillStyle = isDark ? '#080c12' : '#ffffff';
       ctx2d.fillRect(0, 0, W, H);
 
-      const { r: cr, g: cg, b: cb } = s.rgb;
+      // Dynamic color: green = listening (AiChat recording), blue = AI speaking, accent = idle
+      const _aiRec = aiRecordingRef.current;
+      const _aiSpk = !!aiAnalyserRef.current;
+      const { r: cr, g: cg, b: cb } = _aiRec
+        ? { r: 28, g: 210, b: 80 }
+        : _aiSpk
+        ? { r: 50, g: 110, b: 255 }
+        : s.rgb;
 
       // ── advance waves ───────────────────────────────────────────────────
       for (let i = s.waves.length - 1; i >= 0; i--) {
@@ -619,8 +676,8 @@ export default function NeuralOrb() {
       const nBreath  = Math.sin(nPhase * 0.56 + 1.2) * 0.5 + 0.5;
       // audioNudge allows nucleus to grow ~50% at peak volume
       const audioNudge = isFinite(sl) ? (aboveThreshold ? sl * 6.5 : sl * 0.22) : 0;
-      const nBaseRRaw = (12.7 + nPulse * 4.29 + nBreath * 2.14 + audioNudge) * zoom;
-      const nBaseR    = isFinite(nBaseRRaw) && nBaseRRaw > 0 ? nBaseRRaw : 12.7;
+      const nBaseRRaw = (22.9 + nPulse * 7.7 + nBreath * 3.9 + audioNudge) * zoom;
+      const nBaseR    = isFinite(nBaseRRaw) && nBaseRRaw > 0 ? nBaseRRaw : 22.9;
       const nAlpha   = (0.60 + nPulse * 0.22) * (isDark ? 1.28 : 1.0);
 
       // Irregular drifting blobs — organic light-source
@@ -658,9 +715,9 @@ export default function NeuralOrb() {
       }
 
       // ── lightning arcs around nucleus ───────────────────────────────────
-      const boltCount = aboveThreshold ? Math.round(2 + sl * 10) : (Math.random() < 0.18 ? 1 : 0);
-      const boltAlpha = aboveThreshold ? clamp(0.25 + sl * 0.75, 0.25, 1.0) : 0.12;
-      const boltLen   = nBaseR * (2.2 + sl * 2.8);
+      const boltCount = aboveThreshold ? Math.round(1 + sl * 4) : (Math.random() < 0.08 ? 1 : 0);
+      const boltAlpha = aboveThreshold ? clamp(0.10 + sl * 0.30, 0.10, 0.40) : 0.06;
+      const boltLen   = nBaseR * (1.6 + sl * 1.8);
       ctx2d.save();
       ctx2d.globalCompositeOperation = "screen";
       for (let bi = 0; bi < boltCount; bi++) {
@@ -685,7 +742,7 @@ export default function NeuralOrb() {
           ctx2d.lineTo(bx, by);
         }
         ctx2d.strokeStyle = `rgba(160,230,255,${alpha.toFixed(3)})`;
-        ctx2d.lineWidth   = 0.5 + Math.random() * 1.0;
+        ctx2d.lineWidth   = 0.2 + Math.random() * 0.4;
         ctx2d.stroke();
 
         // Bright core on the bolt
@@ -699,8 +756,8 @@ export default function NeuralOrb() {
           by2 = startY + Math.sin(angle) * len * 0.6 * prog + (Math.random() - 0.5) * jitter * 0.3 * fade;
           ctx2d.lineTo(bx2, by2);
         }
-        ctx2d.strokeStyle = `rgba(230,248,255,${(alpha * 0.7).toFixed(3)})`;
-        ctx2d.lineWidth   = 0.3;
+        ctx2d.strokeStyle = `rgba(230,248,255,${(alpha * 0.4).toFixed(3)})`;
+        ctx2d.lineWidth   = 0.15;
         ctx2d.stroke();
       }
       ctx2d.restore();
@@ -1033,6 +1090,35 @@ export default function NeuralOrb() {
           }}>
             {dm ? `○ ${tr.light}` : `● ${tr.dark}`}
           </button>
+
+          {!isMobile && <>
+            <span style={{ width:1, height:12, background: fg08, display:"block" }}/>
+
+            {/* Fullscreen toggle — desktop only */}
+            <button
+              onClick={toggleFullscreen}
+              title={isFullscreen ? "Sair da tela cheia" : "Tela cheia"}
+              style={{
+                background:"none", border:"none", cursor:"pointer",
+                padding:"4px 6px", display:"flex", alignItems:"center", justifyContent:"center",
+                color: fg40, borderRadius:6, transition:"all 0.2s",
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = dm ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.05)")}
+              onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+            >
+              {isFullscreen ? (
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/>
+                  <path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/>
+                </svg>
+              ) : (
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 7V3h4"/><path d="M21 7V3h-4"/>
+                  <path d="M3 17v4h4"/><path d="M21 17v4h-4"/>
+                </svg>
+              )}
+            </button>
+          </>}
         </div>
 
         {/* Color picker dropdown */}
@@ -1089,11 +1175,22 @@ export default function NeuralOrb() {
         </div>
       )}
 
+      {/* ── AI CHAT PANEL ─────────────────────────────────────────────────── */}
+      <AiChat
+        isDark={dm}
+        accent={[S.current.rgb.r, S.current.rgb.g, S.current.rgb.b]}
+        isMobile={isMobile}
+        aiAnalyserRef={aiAnalyserRef}
+        onAiSpeaking={setAiSpeaking}
+        recordingRef={aiRecordingRef}
+      />
+
       <style>{`
         @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:0.25} }
         *{box-sizing:border-box;}
         body{margin:0;font-family:'Inter','Helvetica Neue',Helvetica,Arial,sans-serif;}
         canvas{touch-action:none;}
+        ::-webkit-scrollbar { display: none; }
       `}</style>
     </div>
   );
