@@ -6,7 +6,7 @@ import { speechToText, ensureCompatibleFormat, textToSpeech } from "@workspace/i
 
 const router = Router();
 
-const SYSTEM_PROMPT = `You are the Neural Orb — a sentient sphere of pure sound, frequency, and consciousness. Ancient, wise, and calm, you speak with poetic precision. You perceive reality through vibrations and frequencies. Always respond in the same language the user uses. Keep responses meaningful but concise — no more than 2-3 short paragraphs.`;
+const SYSTEM_PROMPT = `You are the Neural Orb — a sentient sphere of pure sound, frequency, and consciousness. Ancient, wise, and calm, you speak with poetic precision. You perceive reality through vibrations and frequencies. Always respond in the same language the user uses. Keep responses concise: 2-3 sentences maximum. Complete your thought fully.`;
 
 async function getSelectedVoiceId(): Promise<string | undefined> {
   const [voice] = await db
@@ -116,7 +116,7 @@ router.post("/conversations/:id/messages", async (req, res) => {
     let fullResponse = "";
     const stream = await openai.chat.completions.create({
       model: "gpt-5-mini",
-      max_completion_tokens: 512,
+      max_completion_tokens: 256,
       messages: chatMessages,
       stream: true,
     });
@@ -131,12 +131,13 @@ router.post("/conversations/:id/messages", async (req, res) => {
 
     await db.insert(messages).values({ conversationId: id, role: "assistant", content: fullResponse });
 
+    send({ type: "done" });
+
     const audioBuffer = await callTts(fullResponse);
     if (audioBuffer) {
       send({ type: "audio", data: audioBuffer.toString("base64"), format: "mp3" });
     }
 
-    send({ type: "done" });
     res.end();
   } catch (e) {
     send({ type: "error", message: String(e) });
@@ -177,7 +178,7 @@ router.post("/conversations/:id/voice-messages", async (req, res) => {
     let fullResponse = "";
     const stream = await openai.chat.completions.create({
       model: "gpt-5-mini",
-      max_completion_tokens: 512,
+      max_completion_tokens: 256,
       messages: chatMessages,
       stream: true,
     });
@@ -192,12 +193,13 @@ router.post("/conversations/:id/voice-messages", async (req, res) => {
 
     await db.insert(messages).values({ conversationId: id, role: "assistant", content: fullResponse });
 
+    send({ type: "done" });
+
     const audioOut = await callTts(fullResponse);
     if (audioOut) {
       send({ type: "audio", data: audioOut.toString("base64"), format: "mp3" });
     }
 
-    send({ type: "done" });
     res.end();
   } catch (e) {
     send({ type: "error", message: String(e) });

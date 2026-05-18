@@ -195,6 +195,8 @@ export default function NeuralOrb() {
   const aiRecordingRef = useRef(false) as MutableRefObject<boolean>;
   const [aiSpeaking, setAiSpeaking] = useState(false);
   void aiSpeaking;
+  const inputOrbColorRef  = useRef("#00ff64");
+  const outputOrbColorRef = useRef("#4af0ff");
 
   // ── init particles ─────────────────────────────────────────────────────────
   const initParticles = useCallback((cx: number, cy: number) => {
@@ -678,13 +680,18 @@ export default function NeuralOrb() {
       ctx2d.fillStyle = isDark ? '#080c12' : '#ffffff';
       ctx2d.fillRect(0, 0, W, H);
 
-      // Dynamic color: green = listening (AiChat recording), cyan = AI speaking, accent = idle
+      // Dynamic color: input color = recording, output color = AI speaking, accent = idle
       const _aiRec = aiRecordingRef.current || !!chatRecordingAnalyserRef.current;
       const _aiSpk = !!aiAnalyserRef.current;
+      const parseHex = (hex: string) => ({
+        r: parseInt(hex.slice(1,3),16),
+        g: parseInt(hex.slice(3,5),16),
+        b: parseInt(hex.slice(5,7),16),
+      });
       const { r: cr, g: cg, b: cb } = _aiRec
-        ? { r: 0, g: 240, b: 100 }
+        ? parseHex(inputOrbColorRef.current)
         : _aiSpk
-        ? { r: 20, g: 200, b: 255 }
+        ? parseHex(outputOrbColorRef.current)
         : s.rgb;
 
       // ── advance waves ───────────────────────────────────────────────────
@@ -1174,12 +1181,13 @@ export default function NeuralOrb() {
       {/* ── AI CHAT PANEL ─────────────────────────────────────────────────── */}
       <AiChat
         isDark={dm}
-        accent={[S.current.rgb.r, S.current.rgb.g, S.current.rgb.b]}
         isMobile={isMobile}
         aiAnalyserRef={aiAnalyserRef}
         chatRecordingAnalyserRef={chatRecordingAnalyserRef}
         onAiSpeaking={setAiSpeaking}
         recordingRef={aiRecordingRef}
+        onInputColorChange={color => { inputOrbColorRef.current = color; }}
+        onOutputColorChange={color => { outputOrbColorRef.current = color; }}
       />
 
       <style>{`
